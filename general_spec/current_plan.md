@@ -47,7 +47,7 @@
   ├─────┼────────────────────────────────────────────────────────────────────┼───────────────────────────────┤
   │ 9   │ Dural membrane reconstruction (hardest step)                       │ material map + FS labels      │
   ├─────┼────────────────────────────────────────────────────────────────────┼───────────────────────────────┤
-  │ 10  │ Fiber orientation texture (bedpostX → M_0-ready format)            │ domain geometry               │
+  │ 10  │ Fiber orientation texture (bedpostX → pre-computed M_0 tensor)     │ FS labels (for WM masking)    │
   ├─────┼────────────────────────────────────────────────────────────────────┼───────────────────────────────┤
   │ 11  │ Validation + visualization                                         │ everything above              │
   └─────┴────────────────────────────────────────────────────────────────────┴───────────────────────────────┘

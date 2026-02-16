@@ -327,7 +327,7 @@ At the posterior junction where the falx descends to meet the tentorium (the str
 
 **This step must run after Task 8 (Subarachnoid CSF).** The falx and tentorium occupy space that Task 8 filled with subarachnoid CSF (u8 = 8). This step carves thin sheets of dural membrane out of that CSF, overwriting u8 = 8 with u8 = 10. Without Task 8 running first, the interhemispheric fissure and cerebrum–cerebellum gap would still be vacuum (u8 = 0), and the CSF constraint (mat == 8) would find no candidates.
 
-**This step runs before the fiber orientation texture (Task 10).** Task 10 depends only on domain geometry, not on the material map, so there is no ordering constraint with it. But logically, all material map modifications should be complete before final validation (Task 11).
+**This step runs before the fiber orientation texture (Task 10).** Task 10 depends only on the raw FS labels (for WM masking), not on the material map or any other preprocessing output, so there is no ordering constraint between this step and Task 10. But logically, all material map modifications should be complete before final validation (Task 11).
 
 ## 5. Parameters
 

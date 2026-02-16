@@ -96,7 +96,7 @@ In practice, this is a single 4×4 matrix multiply: $M = A_{source}^{-1} \cdot A
 |-----------|--------|-----------|
 | Integer labels (`aparc+aseg`, `wmparc`, `brainmask_fs`, `ribbon`) | Nearest-neighbor | Labels are categorical; interpolation would produce invalid values |
 | Continuous scalar volumes (T1w, T2w, SDF fields) | Trilinear | Smooth data, standard approach |
-| Fiber orientations (bedpostX dyads) | See fiber texture spec | Requires sign-consistent interpolation + renormalization (separate preprocessing step) |
+| Fiber orientations (bedpostX) | N/A (stored at native resolution) | M_0 tensor pre-computed at 1.25mm; runtime trilinear interpolation handles sub-voxel queries. See `fiber_orientation.md`. |
 
 ### 3.3 Out-of-Bounds Handling
 
@@ -284,7 +284,7 @@ The coordinate mapping and slab-based resampling logic defined above is not spec
 | Step | Source volume | Interpolation | Notes |
 |------|--------------|:-------------:|-------|
 | Task 7 (Skull SDF) | Derived from brain mask | Trilinear | SDF is continuous |
-| Task 10 (Fiber texture) | `Diffusion.bedpostX/dyads{1,2,3}.nii.gz`, `mean_f{1,2,3}samples.nii.gz` | Special | Sign-consistent interpolation; see fiber texture spec |
+| Task 10 (Fiber texture) | `Diffusion.bedpostX/dyads{1,2,3}.nii.gz`, `mean_f{1,2,3}samples.nii.gz` | N/A | Pre-computed M_0 stored at native 1.25mm; no resampling needed. See `fiber_orientation.md`. |
 | Visualization | `T1w_acpc_dc_restore_brain.nii.gz` | Trilinear | Optional, for overlay debugging |
 
 All of these use the same $A_{g \to p}$ affine and the same composite-transform approach (Section 3.1). The implementation should expose a reusable function:
