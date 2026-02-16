@@ -265,7 +265,7 @@ The runtime loads this texture into a GPU 3D texture object and samples it using
 
 ### 7.1 Stack
 
-Python 3, nibabel (NIfTI I/O), numpy (array math). No scipy dependency. No additional packages beyond what Tasks 5–9 already use.
+Python 3, nibabel (NIfTI I/O), numpy (array math). No scipy dependency. No additional packages beyond what the other preprocessing steps already use.
 
 ### 7.2 Algorithm Summary
 

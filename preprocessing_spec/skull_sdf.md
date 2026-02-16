@@ -9,7 +9,7 @@ The runtime uses the skull SDF for two things:
 1. **Halo injection** (Step 0, Action C): When an unallocated neighbor of an active fluid voxel has SDF > 0, it is activated and tagged as air halo (material ID 255). This dynamically paints the Monro-Kellie Dirichlet boundary.
 2. **Cut-cell porosity** (φ_geo): Voxels near the SDF = 0 isosurface have partial volume occupancy. The SDF value determines the geometric porosity factor φ_geo ∈ [ε, 1.0], giving smooth boundary behavior instead of binary staircase edges.
 
-The SDF is also used by Task 8 (Subarachnoid CSF) to identify voxels that are inside the skull but not brain tissue.
+The SDF is also used by the Subarachnoid CSF step to identify voxels that are inside the skull but not brain tissue.
 
 **Sign convention:** SDF < 0 inside the skull cavity (brain/CSF domain), SDF > 0 outside (void), SDF = 0 at the skull inner surface.
 
@@ -80,7 +80,7 @@ A morphological closing is a dilation followed by an erosion with the same struc
 
 **What closing preserves:** Locally convex surface regions are unchanged. The overall brain shape (frontal pole, occipital pole, temporal poles) is not shrunk or distorted. Only concavities are filled.
 
-**Effect on the interhemispheric fissure:** The closing also fills the interhemispheric fissure (2-5 mm wide, well within the closing diameter), merging the two cerebral hemispheres into a single solid mask. This is correct — the skull encloses both hemispheres as a single cavity. The internal division between hemispheres (falx cerebri) is reconstructed separately in Task 9 (Dural Membrane Reconstruction).
+**Effect on the interhemispheric fissure:** The closing also fills the interhemispheric fissure (2-5 mm wide, well within the closing diameter), merging the two cerebral hemispheres into a single solid mask. This is correct — the skull encloses both hemispheres as a single cavity. The internal division between hemispheres (falx cerebri) is reconstructed separately in the Dural Membrane step (`dural_membrane.md`).
 
 **Implementation — iterated small ball:**
 
@@ -154,7 +154,7 @@ The resulting SDF has:
 
 ### 4.6 Resample to Simulation Grid
 
-Resample the SDF from source resolution (padded) to the simulation grid using the `resample_to_grid` utility from Task 5:
+Resample the SDF from source resolution (padded) to the simulation grid using the `resample_to_grid` utility from the Domain Geometry step:
 
 ```python
 sdf_sim = resample_to_grid(
@@ -171,7 +171,7 @@ sdf_sim = resample_to_grid(
 
 **cval = 100.0:** Simulation grid voxels that map outside the padded source volume extent receive SDF = +100 mm (firmly "outside skull"). This is a safe default — these voxels are far from the brain and will always be classified as exterior.
 
-**Note on resample_to_grid:** The function signature from Task 5 takes a NIfTI file path. For the SDF, we already have the array in memory (from the EDT computation). The `resample_to_grid` function should be extended to accept either a file path or a `(data, affine)` pair as its first argument. When given a path, it loads the NIfTI as before; when given a tuple, it uses the provided array and affine directly. This is a minor change to the Task 5 utility (a type check on the first argument) that avoids unnecessary disk I/O for in-memory volumes like the SDF.
+**Note on resample_to_grid:** The function signature from the Domain Geometry step takes a NIfTI file path. For the SDF, we already have the array in memory (from the EDT computation). The `resample_to_grid` function should be extended to accept either a file path or a `(data, affine)` pair as its first argument. When given a path, it loads the NIfTI as before; when given a tuple, it uses the provided array and affine directly. This is a minor change to the Domain Geometry utility (a type check on the first argument) that avoids unnecessary disk I/O for in-memory volumes like the SDF.
 
 ### 4.7 Foramen Magnum: Sealed Boundary
 
@@ -199,7 +199,7 @@ Both parameters should be exposed as command-line arguments for tuning:
 
 **R_close:** Values from 7-15 mm all produce reasonable results. Below 7 mm, the Sylvian fissure may not fully close. Above 15 mm, the computation becomes slower with no benefit (there are no concavities wider than ~20 mm that need filling). The closed mask is insensitive to the exact value within this range because closing preserves convex contours — it only affects concavity filling.
 
-**R_dilate:** This directly controls subarachnoid CSF volume (Task 8). At 3 mm, the subarachnoid space is thin — possibly too thin at the basal cisterns. At 5 mm, it provides generous margin but may overestimate convexity CSF. The impact is moderate — the Monro-Kellie controller adapts to whatever CSF volume exists, and permeability values can compensate for thickness errors.
+**R_dilate:** This directly controls subarachnoid CSF volume (see `subarachnoid_csf.md`). At 3 mm, the subarachnoid space is thin — possibly too thin at the basal cisterns. At 5 mm, it provides generous margin but may overestimate convexity CSF. The impact is moderate — the Monro-Kellie controller adapts to whatever CSF volume exists, and permeability values can compensate for thickness errors.
 
 ### 5.2 Known Limitation: Basal Cisterns
 
@@ -218,7 +218,7 @@ The subarachnoid space varies in thickness from ~1 mm at the convexity to ~10-15
 | Units | mm (signed distance to skull inner surface) |
 | Sign convention | Negative inside skull, positive outside |
 
-Saved to `data/processed/{subject_id}/{profile}/` alongside the Task 5 outputs.
+Saved to `data/processed/{subject_id}/{profile}/` alongside the Domain Geometry outputs.
 
 ### 6.2 Size Estimate
 
@@ -228,7 +228,7 @@ A 512^3 float32 volume is 512 MB uncompressed. NIfTI gzip compression reduces th
 
 ### 7.1 Stack
 
-Same as Task 5: Python 3, nibabel, scipy (`scipy.ndimage` for morphological operations and EDT), numpy. No additional dependencies.
+Same as the Domain Geometry step: Python 3, nibabel, scipy (`scipy.ndimage` for morphological operations and EDT), numpy. No additional dependencies.
 
 ### 7.2 Algorithm Summary
 
@@ -290,7 +290,7 @@ All morphological operations and EDT are performed at padded source resolution (
 
 Peak: ~794 MB during resampling. Comfortable on a 5.7 GB system.
 
-**Note:** The EDT arrays are float64 (scipy default). The `dt_outside` and `dt_inside` arrays can be freed after computing `sdf_source`, reducing peak EDT memory. The resampling phase is the bottleneck, and it uses the same slab-based approach as Task 5.
+**Note:** The EDT arrays are float64 (scipy default). The `dt_outside` and `dt_inside` arrays can be freed after computing `sdf_source`, reducing peak EDT memory. The resampling phase is the bottleneck, and it uses the same slab-based approach as the Domain Geometry step.
 
 ## 8. Validation
 
@@ -306,10 +306,10 @@ Expected: ~1,500-1,750 mL. This is larger than the brain mask volume (~1,332 mL)
 
 ### 8.2 Brain Containment
 
-Every voxel of the resampled brain mask (from Task 5) must have SDF < 0. Formally:
+Every voxel of the resampled brain mask (from the Domain Geometry step) must have SDF < 0. Formally:
 
 ```python
-brain_sim = load('brain_mask.nii.gz')  # Task 5 output
+brain_sim = load('brain_mask.nii.gz')  # Domain Geometry output
 assert np.all(sdf_sim[brain_sim > 0] < 0), "Brain tissue found outside skull SDF"
 ```
 
@@ -358,7 +358,7 @@ Report the standard deviation of SDF values in a thin shell around the SDF = 0 s
 
 **Why R_close = 10 mm?** The Sylvian fissure is funnel-shaped: narrow at depth (~2-5 mm), wider at the cortical surface (~10-15 mm). A 10 mm closing fills the narrow deep portions completely. Any remaining gap at the wider surface opening is then sealed by the 4 mm outward dilation (Section 4.3). The two operations work together — the closing doesn't need to seal the entire fissure alone. A smaller closing radius (< 7 mm) would leave too much of the fissure unclosed for the dilation to compensate. A larger radius provides no additional benefit.
 
-**Why R_dilate = 4 mm?** The subarachnoid space in a healthy young adult is ~2-5 mm thick at the convexity. The meninges add ~1 mm. A 4 mm expansion places the SDF = 0 surface at approximately the inner skull table. This is deliberately conservative — a slightly thin subarachnoid space is better than an unrealistically thick one, and Task 8 will paint whatever gap exists as CSF regardless.
+**Why R_dilate = 4 mm?** The subarachnoid space in a healthy young adult is ~2-5 mm thick at the convexity. The meninges add ~1 mm. A 4 mm expansion places the SDF = 0 surface at approximately the inner skull table. This is deliberately conservative — a slightly thin subarachnoid space is better than an unrealistically thick one, and the Subarachnoid CSF step will paint whatever gap exists as CSF regardless.
 
 **Why compute at source resolution (0.7 mm) and resample?** Morphological operations are exact on the native binary mask — no resampling staircase artifacts at the mask boundary. The source volume (260^3) is 15x smaller than the simulation grid (512^3), so all operations are faster. The SDF is a smooth field, so trilinear resampling to the simulation grid is clean and introduces no artifacts.
 

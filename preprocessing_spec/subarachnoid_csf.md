@@ -8,7 +8,7 @@ The subarachnoid CSF serves two roles in the simulation:
 
 1. **Drainage pathway.** Fluid from a hemorrhage seeps through brain tissue (low permeability) and eventually reaches the subarachnoid space (high permeability), where it flows rapidly toward the skull boundary. The air halo at the skull surface (material ID 255, painted at runtime) acts as the Monro-Kellie Dirichlet boundary. Without subarachnoid CSF, there is no high-permeability path between the brain surface and the boundary — pressure would build unrealistically.
 
-2. **Domain closure.** After this step, every voxel inside the skull (SDF < 0) has a nonzero material index. No vacuum remains inside the cranial cavity. This is the invariant that downstream steps (Task 9: dural membrane, and eventually the runtime solver) rely on.
+2. **Domain closure.** After this step, every voxel inside the skull (SDF < 0) has a nonzero material index. No vacuum remains inside the cranial cavity. This is the invariant that downstream steps (the Dural Membrane step, and eventually the runtime solver) rely on.
 
 The subarachnoid CSF is material class u8 = 8 in the material map. It receives high K_iso in the permeability LUT (~10^-8 to 10^-7 m^2) — essentially free-flowing fluid. It is separated from ventricular CSF (u8 = 7) so the Monro-Kellie controller can track ventricular volume independently (ventricular expansion is a key clinical indicator).
 
@@ -39,15 +39,15 @@ This population forms a contiguous envelope wrapping the cortical surface and pe
 
 **What it is:** CSF in the thin layer between the outer brain surface (gyral crowns) and the inner skull (SDF = 0 isosurface). This corresponds anatomically to the subarachnoid space at the convexity plus the pia/arachnoid membranes (too thin to resolve individually).
 
-**How we know it's there:** The skull SDF was built by morphologically closing and dilating the brain mask (Task 7). The dilation extends R_dilate = 4 mm beyond the closed brain surface. Voxels in this shell are inside the skull (SDF < 0) but outside the brain mask.
+**How we know it's there:** The skull SDF was built by morphologically closing and dilating the brain mask (see `skull_sdf.md`). The dilation extends R_dilate = 4 mm beyond the closed brain surface. Voxels in this shell are inside the skull (SDF < 0) but outside the brain mask.
 
 **Estimated volume:** A naive estimate using the closed brain surface area (~700 cm^2) times R_dilate (4 mm) gives ~280 mL. The actual shell CSF is much less than this, because the skull SDF boundary was built from the *closed* brain mask, not the original brain mask. At cortical concavities (sulcal openings, fissures), the closing pushed the effective surface outward beyond the original brain mask boundary. The dilation then starts from this already-expanded surface. So the space between the original brain mask and the SDF = 0 surface is split between two populations: sulcal CSF (inside the brain mask, step 1) absorbs the interior portion, and shell CSF (outside the brain mask, step 2) absorbs only the outer portion. The true shell CSF (outside brain mask, inside SDF) is estimated at ~80-120 mL at source resolution.
 
 ### 2.3 Why FreeSurfer Label 24 is Insufficient
 
-FreeSurfer's CSF label (FS label 24, mapped to u8 = 8 in Task 6) captures only 3,330 voxels (1.14 mL) in subject 157336. These are almost entirely deep midline CSF around the 3rd ventricle and thalami — not subarachnoid CSF. There is essentially zero coverage of the cortical convexity, sulcal spaces, or basal cisterns. Label 24 provides <1% of the actual subarachnoid CSF volume.
+FreeSurfer's CSF label (FS label 24, mapped to u8 = 8 in the Label Remapping step) captures only 3,330 voxels (1.14 mL) in subject 157336. These are almost entirely deep midline CSF around the 3rd ventricle and thalami — not subarachnoid CSF. There is essentially zero coverage of the cortical convexity, sulcal spaces, or basal cisterns. Label 24 provides <1% of the actual subarachnoid CSF volume.
 
-The label 24 voxels that were already mapped to u8 = 8 by Task 6 are unaffected by this step (they have material_map != 0, so the gap-fill skips them).
+The label 24 voxels that were already mapped to u8 = 8 by the Label Remapping step are unaffected by this step (they have material_map != 0, so the gap-fill skips them).
 
 ## 3. Inputs
 
@@ -55,10 +55,10 @@ All inputs are at simulation grid resolution, produced by previous preprocessing
 
 | File | From | Content |
 |------|------|---------|
-| `material_map.nii.gz` | Task 6 | u8 material indices (0 = vacuum, 1-11 = tissue/fluid classes) |
-| `skull_sdf.nii.gz` | Task 7 | Signed distance to inner skull surface (float32, mm) |
-| `brain_mask.nii.gz` | Task 5 | Binary brain mask (uint8, 0/1) |
-| `grid_meta.json` | Task 5 | Grid parameters (N, dx_mm) |
+| `material_map.nii.gz` | Label Remapping step | u8 material indices (0 = vacuum, 1-11 = tissue/fluid classes) |
+| `skull_sdf.nii.gz` | Skull SDF step | Signed distance to inner skull surface (float32, mm) |
+| `brain_mask.nii.gz` | Domain Geometry step | Binary brain mask (uint8, 0/1) |
+| `grid_meta.json` | Domain Geometry step | Grid parameters (N, dx_mm) |
 
 All files are in the same coordinate system (simulation grid, affine A_g_to_p) and have the same shape (N^3).
 
@@ -99,11 +99,11 @@ This captures voxels in the dilation shell between the brain mask boundary and t
 
 **Why `sdf < 0` exactly (not `sdf < -epsilon`):** The SDF transitions smoothly through zero at the skull surface. Voxels at SDF ~ 0 are boundary voxels where the cut-cell porosity phi_geo applies. Painting them as CSF is correct — they represent the innermost skull surface, which is occupied by CSF. Voxels at SDF > 0 become air halo at runtime.
 
-### 4.4 Ordering with Task 9
+### 4.4 Ordering with the Dural Membrane Step
 
-Task 9 (dural membrane reconstruction) will overwrite some subarachnoid CSF voxels with u8 = 10 (dural membrane). The falx cerebri sits in the interhemispheric fissure, which this step fills with CSF. The tentorium cerebelli sits between the cerebrum and cerebellum, also in CSF-filled space. Task 9 carves thin sheets of dural membrane out of this CSF.
+The Dural Membrane step will overwrite some subarachnoid CSF voxels with u8 = 10 (dural membrane). The falx cerebri sits in the interhemispheric fissure, which this step fills with CSF. The tentorium cerebelli sits between the cerebrum and cerebellum, also in CSF-filled space. The Dural Membrane step carves thin sheets of dural membrane out of this CSF.
 
-**This step must run before Task 9.** The dural membrane is a refinement of the subarachnoid CSF region, not a separate domain.
+**This step must run before the Dural Membrane step.** The dural membrane is a refinement of the subarachnoid CSF region, not a separate domain.
 
 ## 5. Outputs
 
@@ -221,7 +221,7 @@ print(f"Shell CSF:   {n_shell:,} voxels  ({vol_shell:.1f} mL)")
 print(f"Total new:   {n_sulcal + n_shell:,} voxels  ({vol_total:.1f} mL)")
 ```
 
-Also report the total u8 = 8 volume (including voxels already assigned by Task 6 from FS label 24):
+Also report the total u8 = 8 volume (including voxels already assigned by the Label Remapping step from FS label 24):
 
 ```python
 n_total_sas = np.count_nonzero(mat == 8)
@@ -238,7 +238,7 @@ print(f"Total subarachnoid CSF (u8=8): {n_total_sas:,} voxels ({vol_total_sas:.1
 | Total subarachnoid | 200-350 mL | Includes meninges and slight dilation overestimate |
 | FS label 24 (pre-existing) | ~1 mL | Negligible contribution |
 
-The total exceeds the physiological subarachnoid CSF volume (~100-150 mL) because: (a) the uniform R_dilate = 4 mm overestimates the convexity space in some regions, (b) the meninges (pia, arachnoid, dura — ~1-2 mm combined) are included as CSF since they cannot be resolved at simulation resolution, and (c) the morphological closing in Task 7 may slightly expand the skull boundary into spaces that are anatomically extradural. This overestimate is acceptable — the Monro-Kellie controller adapts to whatever CSF volume exists, and permeability values can compensate for thickness errors.
+The total exceeds the physiological subarachnoid CSF volume (~100-150 mL) because: (a) the uniform R_dilate = 4 mm overestimates the convexity space in some regions, (b) the meninges (pia, arachnoid, dura — ~1-2 mm combined) are included as CSF since they cannot be resolved at simulation resolution, and (c) the morphological closing in the Skull SDF step may slightly expand the skull boundary into spaces that are anatomically extradural. This overestimate is acceptable — the Monro-Kellie controller adapts to whatever CSF volume exists, and permeability values can compensate for thickness errors.
 
 ### 7.3 Material Map Census
 
@@ -258,7 +258,7 @@ Key checks:
 - u8 = 255 (air halo) should be 0 — it is only assigned at runtime.
 - u8 = 7 (ventricular CSF) should be ~20-30 mL.
 - u8 = 8 (subarachnoid CSF) should match the total from Section 7.2.
-- u8 = 1-6, 9, 11 (tissue classes) should be unchanged from Task 6.
+- u8 = 1-6, 9, 11 (tissue classes) should be unchanged from the Label Remapping step.
 
 ### 7.4 Sulcal CSF Topology
 
@@ -289,13 +289,13 @@ Expected: one dominant component. If the shell is fragmented, the dilation radiu
 ## 8. Design Rationale
 
 **Why two steps instead of one?** A single gap-fill (`(sdf < 0) & (material_map == 0)`) produces an identical material map. The two-step separation exists purely for observability. By splitting sulcal CSF (brain mask interior) from shell CSF (brain mask exterior), we can:
-- Report volumes separately, making it easy to diagnose problems (e.g., if sulcal volume is zero, Task 6 likely over-labeled; if shell volume is zero, the SDF is too tight)
-- Trace each population back to its upstream task (sulcal → Task 6's label gaps, shell → Task 7's dilation radius)
+- Report volumes separately, making it easy to diagnose problems (e.g., if sulcal volume is zero, the Label Remapping step likely over-labeled; if shell volume is zero, the SDF is too tight)
+- Trace each population back to its upstream step (sulcal → Label Remapping's label gaps, shell → Skull SDF's dilation radius)
 - Confirm that the brain mask and SDF are geometrically consistent (the shell should be a continuous layer between the two boundaries)
 
-**Why operate at simulation resolution, not source resolution?** The material map, SDF, and brain mask are all already resampled to the simulation grid by Tasks 5-7. Operating at simulation resolution avoids reaching back to source volumes, keeps the pipeline linear, and ensures the gap-fill is exact at the resolution the solver will use. The alternative (source-resolution gap-fill before resampling) would provide marginally better boundary precision but requires saving Task 7's intermediate binary mask and complicates the pipeline for negligible benefit.
+**Why operate at simulation resolution, not source resolution?** The material map, SDF, and brain mask are all already resampled to the simulation grid by the preceding steps. Operating at simulation resolution avoids reaching back to source volumes, keeps the pipeline linear, and ensures the gap-fill is exact at the resolution the solver will use. The alternative (source-resolution gap-fill before resampling) would provide marginally better boundary precision but requires saving the Skull SDF step's intermediate binary mask and complicates the pipeline for negligible benefit.
 
-**Why overwrite material_map.nii.gz in place?** The subarachnoid CSF identification is a refinement of the material map, not a separate data product. After this step, the material map is the canonical source of truth for all tissue/fluid assignments. Keeping the old and new versions as separate files invites confusion about which one downstream steps should read. The Task 6 material map can be reconstructed from the resampled FS labels at any time.
+**Why overwrite material_map.nii.gz in place?** The subarachnoid CSF identification is a refinement of the material map, not a separate data product. After this step, the material map is the canonical source of truth for all tissue/fluid assignments. Keeping the old and new versions as separate files invites confusion about which one downstream steps should read. The Label Remapping material map can be reconstructed from the resampled FS labels at any time.
 
 **Why is the total subarachnoid volume larger than physiological values?** Physiological subarachnoid CSF is ~100-150 mL. Our estimate (200-350 mL) is higher because: (1) we cannot resolve the meninges (pia + arachnoid + dura ≈ 1-2 mm) at simulation resolution, so they are included as CSF; (2) the uniform R_dilate overestimates some regions while underestimating others (basal cisterns); (3) the morphological closing fills sulci slightly beyond their anatomical depth. This is acceptable for simulation purposes — the subarachnoid space functions as a high-permeability drainage pathway regardless of its exact volume, and the Monro-Kellie controller adjusts to the actual domain geometry.
 

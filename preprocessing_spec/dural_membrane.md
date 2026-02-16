@@ -68,9 +68,9 @@ All inputs are at simulation grid resolution, produced by previous preprocessing
 
 | File | From | Content |
 |------|------|---------|
-| `material_map.nii.gz` | Task 8 | u8 material indices. After Task 8, every voxel inside the skull has a nonzero class. Subarachnoid CSF = u8 8. |
-| `fs_labels_resampled.nii.gz` | Task 5 | Original FreeSurfer aparc+aseg labels at simulation grid resolution (int16). Needed to distinguish left from right hemisphere and identify CC labels. |
-| `grid_meta.json` | Task 5 | Grid parameters (N, dx_mm) |
+| `material_map.nii.gz` | Subarachnoid CSF step | u8 material indices. After the Subarachnoid CSF step, every voxel inside the skull has a nonzero class. Subarachnoid CSF = u8 8. |
+| `fs_labels_resampled.nii.gz` | Domain Geometry step | Original FreeSurfer aparc+aseg labels at simulation grid resolution (int16). Needed to distinguish left from right hemisphere and identify CC labels. |
+| `grid_meta.json` | Domain Geometry step | Grid parameters (N, dx_mm) |
 
 **Why fs_labels_resampled?** The material map collapses left/right into bilateral classes (e.g., u8 = 1 includes both Left- and Right-Cerebral-White-Matter). The falx reconstruction requires distinguishing hemispheres, which is only possible from the original FreeSurfer labels.
 
@@ -325,9 +325,9 @@ At the posterior junction where the falx descends to meet the tentorium (the str
 
 ### 4.6 Ordering with Previous Steps
 
-**This step must run after Task 8 (Subarachnoid CSF).** The falx and tentorium occupy space that Task 8 filled with subarachnoid CSF (u8 = 8). This step carves thin sheets of dural membrane out of that CSF, overwriting u8 = 8 with u8 = 10. Without Task 8 running first, the interhemispheric fissure and cerebrum–cerebellum gap would still be vacuum (u8 = 0), and the CSF constraint (mat == 8) would find no candidates.
+**This step must run after the Subarachnoid CSF step.** The falx and tentorium occupy space that the Subarachnoid CSF step filled with subarachnoid CSF (u8 = 8). This step carves thin sheets of dural membrane out of that CSF, overwriting u8 = 8 with u8 = 10. Without the Subarachnoid CSF step running first, the interhemispheric fissure and cerebrum–cerebellum gap would still be vacuum (u8 = 0), and the CSF constraint (mat == 8) would find no candidates.
 
-**This step runs before the fiber orientation texture (Task 10).** Task 10 depends only on the raw FS labels (for WM masking), not on the material map or any other preprocessing output, so there is no ordering constraint between this step and Task 10. But logically, all material map modifications should be complete before final validation (Task 11).
+**This step runs before the Fiber Orientation step.** The Fiber Orientation step depends only on the raw FS labels (for WM masking), not on the material map or any other preprocessing output, so there is no ordering constraint between this step and the Fiber Orientation step. But logically, all material map modifications should be complete before final validation.
 
 ## 5. Parameters
 
@@ -380,7 +380,7 @@ Volume counts, per-structure breakdown, and validation results are logged to std
 
 ### 7.1 Stack
 
-Python 3, nibabel, numpy, scipy (`scipy.ndimage` for EDT and morphological dilation). Same dependencies as Tasks 7–8.
+Python 3, nibabel, numpy, scipy (`scipy.ndimage` for EDT and morphological dilation). Same dependencies as the Skull SDF and Subarachnoid CSF steps.
 
 ### 7.2 Algorithm Summary
 
@@ -594,7 +594,7 @@ Expected: 1.0–2.0 mm (1–2 voxels at dev resolution).
 
 ### 8.3 Material Map Census
 
-Report complete voxel counts after the update (same format as Task 8, Section 7.3). Key check: u8 = 10 should now have nonzero count, and u8 = 8 should have decreased by exactly n_total.
+Report complete voxel counts after the update (same format as the Subarachnoid CSF step, Section 7.3). Key check: u8 = 10 should now have nonzero count, and u8 = 8 should have decreased by exactly n_total.
 
 ### 8.4 Medial Wall Proximity (Falx Quality Check)
 

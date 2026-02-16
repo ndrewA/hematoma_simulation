@@ -1,10 +1,10 @@
 # Preprocessing Step 7: Validation and Diagnostic Visualization
 
-This document specifies the cross-cutting validation and publication-quality diagnostic visualization for all preprocessing outputs (Tasks 5–10). It is the final preprocessing step — a quality gate that confirms the anatomical model is correct before the solver runs.
+This document specifies the cross-cutting validation and diagnostic visualization for all preceding preprocessing outputs. It is the final preprocessing step — a quality gate that confirms the anatomical model is correct before the solver runs.
 
 ## 1. Purpose
 
-The per-step validation checks embedded in Tasks 5–10 verify local invariants (brain volume conservation, label preservation, SDF smoothness, membrane continuity). This step validates **cross-cutting** invariants that span multiple outputs and cannot be checked in isolation:
+The per-step validation checks embedded in each preceding step verify local invariants (brain volume conservation, label preservation, SDF smoothness, membrane continuity). This step validates **cross-cutting** invariants that span multiple outputs and cannot be checked in isolation:
 
 1. **Header consistency.** All grid-resolution NIfTIs must share identical affines. The fiber texture affine must map to the same physical space. Grid metadata must agree with NIfTI headers.
 2. **Domain closure.** The material map and skull SDF must form a sealed domain — no vacuum inside the skull, no tissue outside it.
@@ -12,20 +12,20 @@ The per-step validation checks embedded in Tasks 5–10 verify local invariants 
 
 The step also produces **diagnostic figures** — spatially-localized error detection that statistics cannot provide. A brain volume within normal range does not prove the material map is correct; a triplanar overlay on T1w shows whether the classes are in the right anatomical locations.
 
-**Dual role:** These outputs serve both engineering QC (catch bugs before the solver runs) and research methodology evidence (publication-quality figures for the paper, JSON metrics for cross-subject aggregation in Table 1).
+**Dual role:** These outputs serve both engineering QC (catch bugs before the solver runs) and methodology evidence (diagnostic figures and JSON metrics for cross-subject aggregation).
 
 ## 2. Inputs
 
-All preprocessing outputs from Tasks 5–10, plus the source T1w for visualization overlay:
+All preprocessing outputs from the preceding steps, plus the source T1w for visualization overlay:
 
 | File | Source | Shape | Dtype | Content |
 |------|--------|-------|-------|---------|
-| `material_map.nii.gz` | Task 9 (final) | N³ | uint8 | Material classes 0–11 |
-| `skull_sdf.nii.gz` | Task 7 | N³ | float32 | Signed distance to inner skull (mm) |
-| `brain_mask.nii.gz` | Task 5 | N³ | uint8 | Binary brain mask |
-| `fs_labels_resampled.nii.gz` | Task 5 | N³ | int16 | Original FreeSurfer labels |
-| `grid_meta.json` | Task 5 | — | JSON | Grid parameters (N, dx_mm, affines) |
-| `fiber_M0.nii.gz` | Task 10 | 145×174×145×6 | float32 | Structure tensor (profile-independent) |
+| `material_map.nii.gz` | Dural Membrane step (final) | N³ | uint8 | Material classes 0–11 |
+| `skull_sdf.nii.gz` | Skull SDF step | N³ | float32 | Signed distance to inner skull (mm) |
+| `brain_mask.nii.gz` | Domain Geometry step | N³ | uint8 | Binary brain mask |
+| `fs_labels_resampled.nii.gz` | Domain Geometry step | N³ | int16 | Original FreeSurfer labels |
+| `grid_meta.json` | Domain Geometry step | — | JSON | Grid parameters (N, dx_mm, affines) |
+| `fiber_M0.nii.gz` | Fiber Orientation step | 145×174×145×6 | float32 | Structure tensor (profile-independent) |
 | `T1w_acpc_dc_restore_brain.nii.gz` | Raw HCP | 260×311×260 | float32 | T1w structural image for overlay |
 
 All grid-resolution files are in `data/processed/{subject_id}/{profile}/`. The fiber texture is in `data/processed/{subject_id}/` (profile-independent). The T1w source is in `data/raw/{subject_id}/T1w/`.
@@ -86,7 +86,7 @@ These verify the sealed-domain invariant — the material map and skull SDF toge
 | D4 | WARN | No isolated vacuum islands inside the active domain | See below |
 | D5 | WARN | SDF Eikonal property: gradient magnitude ≈ 1.0 | `np.percentile(sampled_grad_mag, [5, 95])` in [0.8, 1.2] |
 
-**D1** is the strongest invariant of the preprocessing pipeline. If vacuum exists inside the skull, the runtime solver encounters undefined material at active voxels. This was already checked in Task 8's per-step validation; the cross-cutting check here confirms the invariant survives the subsequent dural membrane painting (Task 9), which modifies the material map.
+**D1** is the strongest invariant of the preprocessing pipeline. If vacuum exists inside the skull, the runtime solver encounters undefined material at active voxels. This was already checked in the Subarachnoid CSF step's per-step validation; the cross-cutting check here confirms the invariant survives the subsequent dural membrane painting (Dural Membrane step), which modifies the material map.
 
 **D2** catches the inverse failure: tissue labels that leaked outside the skull. This can occur if the SDF and material map were resampled with inconsistent affines or if nearest-neighbor resampling placed a tissue label at a boundary voxel where the SDF is positive.
 
@@ -149,7 +149,7 @@ These verify the material map contains only valid values and is consistent with 
 
 **M3:** At debug resolution (256³, 2.0 mm), some thin structures (dural membrane, vessels) may have zero voxels. The check warns but does not fail, since the debug profile is not used for production simulation.
 
-**M4:** A brain mask voxel with mat == 0 indicates a labeling gap — the brain mask considers it intracranial, the FS labels did not label it, and the subarachnoid CSF gap-fill did not reach it. This should be impossible after Task 8 but would indicate a serious bug if present.
+**M4:** A brain mask voxel with mat == 0 indicates a labeling gap — the brain mask considers it intracranial, the FS labels did not label it, and the subarachnoid CSF gap-fill did not reach it. This should be impossible after the Subarachnoid CSF step but would indicate a serious bug if present.
 
 ### 3.4 Module: Volume Sanity (6 checks)
 
@@ -449,7 +449,7 @@ linewidths = [0.5, 0.5, 0.5, 2.0, 0.5, 0.5]
 
 **Row 2, panel 2:** The brain mask boundary (1-voxel-dilated minus original) overlaid on the SDF. This shows the margin between the brain surface and the SDF = 0 isosurface — it should be approximately R_dilate (4 mm) everywhere.
 
-**Row 2, panel 3:** A zoomed coronal view of the Sylvian fissure region. The Sylvian fissure is the deepest cortical concavity — if the morphological closing in Task 7 failed, the SDF zero-contour would dip into the fissure. The zoom region is ±40 voxels around the lateral fissure (approximately y = N/2, lateral to the brain center).
+**Row 2, panel 3:** A zoomed coronal view of the Sylvian fissure region. The Sylvian fissure is the deepest cortical concavity — if the morphological closing in the Skull SDF step failed, the SDF zero-contour would dip into the fissure. The zoom region is ±40 voxels around the lateral fissure (approximately y = N/2, lateral to the brain center).
 
 ### 4.4 Figure 4: Fiber Orientation DEC Map (4 panels + legend)
 
@@ -489,7 +489,7 @@ dec_color = rgb * brightness
 
 ### 4.5 Figure 5: Validation Summary (text + thumbnails)
 
-**Purpose:** A single-page overview with all check results and key metrics, suitable for quick review or inclusion as a supplementary figure.
+**Purpose:** A single-page overview with all check results and key metrics, suitable for quick review.
 
 **Layout:** 3 sections arranged vertically.
 
@@ -709,7 +709,7 @@ Five PNG files at 300 DPI. Typical sizes:
 
 ### 7.1 Stack
 
-Python 3, numpy, scipy (`scipy.ndimage` for connected components and `map_coordinates` for interpolation), nibabel (NIfTI I/O), matplotlib (Agg backend, for all figures). Same dependencies as Tasks 5–10 — no additional packages.
+Python 3, numpy, scipy (`scipy.ndimage` for connected components and `map_coordinates` for interpolation), nibabel (NIfTI I/O), matplotlib (Agg backend, for all figures). Same dependencies as the preceding preprocessing steps — no additional packages.
 
 ### 7.2 CLI Interface
 
@@ -848,13 +848,13 @@ All CRITICAL checks should pass. Possible WARN outcomes:
 
 ## 9. Design Rationale
 
-**Why cross-cutting checks are necessary.** Per-step checks verify local invariants (e.g., Task 8 confirms zero vacuum inside the skull after CSF gap-fill). But Task 9 modifies the material map afterward — painting dural membrane over CSF voxels. The cross-cutting D1 check verifies the invariant still holds after all modifications. Similarly, the fiber forward-transform check (F1) validates the interaction between two independent outputs (material map + fiber texture) that no single step can verify.
+**Why cross-cutting checks are necessary.** Per-step checks verify local invariants (e.g., the Subarachnoid CSF step confirms zero vacuum inside the skull after CSF gap-fill). But the Dural Membrane step modifies the material map afterward — painting dural membrane over CSF voxels. The cross-cutting D1 check verifies the invariant still holds after all modifications. Similarly, the fiber forward-transform check (F1) validates the interaction between two independent outputs (material map + fiber texture) that no single step can verify.
 
 **Why each visualization catches failures that statistics miss.** A brain parenchyma volume of 1,300 mL is normal — but it could comprise 1,300 mL of white matter with zero gray matter, or 1,300 mL correctly distributed. Only the triplanar overlay (Figure 1) reveals spatial accuracy. Similarly, the dural membrane volume might be correct but placed at the wrong anatomical location — only Figure 2 catches this. The SDF contour overlay (Figure 3) reveals whether the zero-contour dips into sulci, which the gradient magnitude statistic (a scalar) cannot localize.
 
-**Why PNGs + JSON over HTML.** The outputs serve a paper-first workflow: PNGs go directly into the methods figure, and JSON feeds Table 1 (cross-subject aggregation of preprocessing metrics across N subjects). HTML would require a viewer and cannot be directly embedded in a paper. JSON is trivially parseable by the table-generation script.
+**Why PNGs + JSON over HTML.** PNGs are directly viewable and embeddable without a viewer. JSON is trivially parseable for cross-subject aggregation scripts.
 
-**Why full forward-transform fiber check.** The runtime samples M_0 by transforming grid coordinates to physical space, then to diffusion voxel coordinates, then trilinear interpolation. The validation must test this exact path — not a proxy like nearest-neighbor lookup or checking at diffusion resolution. Any error in the affine composition (wrong matrix, transposed axes, off-by-one in the voxel-center convention) would only be caught by the forward-transform check. Reviewers of the paper will expect quantitative evidence that the fiber data reaches the solver correctly.
+**Why full forward-transform fiber check.** The runtime samples M_0 by transforming grid coordinates to physical space, then to diffusion voxel coordinates, then trilinear interpolation. The validation must test this exact path — not a proxy like nearest-neighbor lookup or checking at diffusion resolution. Any error in the affine composition (wrong matrix, transposed axes, off-by-one in the voxel-center convention) would only be caught by the forward-transform check.
 
 **Why single script.** The grid volumes total ~768 MB (mat + sdf + brain_mask) at 512³. Loading them in separate scripts would mean loading+freeing 768 MB per script, with significant I/O overhead for gzipped NIfTIs. A single script loads each volume once and shares it across all checks and figures. The phase-based memory management keeps peak usage at ~1.3 GB — well within the 5.7 GB system limit.
 

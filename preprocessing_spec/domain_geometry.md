@@ -128,9 +128,9 @@ The domain geometry step produces the following files, saved to a per-profile ou
 | Shape | $N^3$ (e.g., 512×512×512 for dev) |
 | Dtype | `int16` |
 | Affine | $A_{g \to p}$ (encodes the simulation grid coordinate system) |
-| Content | FreeSurfer labels from `aparc+aseg.nii.gz`, resampled via nearest-neighbor. **Not yet remapped** to simulation u8 indices — that is Task 6. |
+| Content | FreeSurfer labels from `aparc+aseg.nii.gz`, resampled via nearest-neighbor. **Not yet remapped** to simulation u8 indices — that is the Label Remapping step (`material_map.md`). |
 
-**Why int16, not uint8?** FreeSurfer labels range from 0 to 2035 (cortical parcels ctx-lh-\* = 1001–1035, ctx-rh-\* = 2001–2035). These exceed the uint8 range (0–255). The raw labels must be preserved at full fidelity so that the remapping step (Task 6) can distinguish every FreeSurfer label. The conversion to uint8 happens *after* remapping — the collapsed 11-class material index fits comfortably in uint8.
+**Why int16, not uint8?** FreeSurfer labels range from 0 to 2035 (cortical parcels ctx-lh-\* = 1001–1035, ctx-rh-\* = 2001–2035). These exceed the uint8 range (0–255). The raw labels must be preserved at full fidelity so that the Label Remapping step (`material_map.md`) can distinguish every FreeSurfer label. The conversion to uint8 happens *after* remapping — the collapsed 11-class material index fits comfortably in uint8.
 
 **Why output raw FreeSurfer labels first?** Separation of concerns. This step handles only geometry and resampling. Keeping the label remapping separate means you can open the resampled label volume in any NIfTI viewer (FSLeyes, freeview) and compare it against the original segmentation to catch resampling errors before the label collapse makes the volume harder to interpret.
 
@@ -283,8 +283,8 @@ The coordinate mapping and slab-based resampling logic defined above is not spec
 
 | Step | Source volume | Interpolation | Notes |
 |------|--------------|:-------------:|-------|
-| Task 7 (Skull SDF) | Derived from brain mask | Trilinear | SDF is continuous |
-| Task 10 (Fiber texture) | `Diffusion.bedpostX/dyads{1,2,3}.nii.gz`, `mean_f{1,2,3}samples.nii.gz` | N/A | Pre-computed M_0 stored at native 1.25mm; no resampling needed. See `fiber_orientation.md`. |
+| Skull SDF step | Derived from brain mask | Trilinear | SDF is continuous |
+| Fiber Orientation step | `Diffusion.bedpostX/dyads{1,2,3}.nii.gz`, `mean_f{1,2,3}samples.nii.gz` | N/A | Pre-computed M_0 stored at native 1.25mm; no resampling needed. See `fiber_orientation.md`. |
 | Visualization | `T1w_acpc_dc_restore_brain.nii.gz` | Trilinear | Optional, for overlay debugging |
 
 All of these use the same $A_{g \to p}$ affine and the same composite-transform approach (Section 3.1). The implementation should expose a reusable function:
@@ -318,6 +318,6 @@ This function is the shared workhorse. The domain geometry script calls it for `
 
 **Why nearest-neighbor for labels?** Interpolating categorical data is undefined. Nearest-neighbor is the only valid method for integer labels. The 1.43× downsampling ratio is mild enough that no structures are lost.
 
-**Why output unresampled FreeSurfer labels instead of remapped u8 indices?** Separation of concerns. This step handles only geometry and resampling. The label→u8 remapping (Task 6) is a pure lookup table operation on the already-resampled volume. Keeping them separate means you can inspect the resampled FreeSurfer labels directly in a viewer and verify spatial accuracy before the label collapse makes the volume harder to interpret.
+**Why output unresampled FreeSurfer labels instead of remapped u8 indices?** Separation of concerns. This step handles only geometry and resampling. The label→u8 remapping (`material_map.md`) is a pure lookup table operation on the already-resampled volume. Keeping them separate means you can inspect the resampled FreeSurfer labels directly in a viewer and verify spatial accuracy before the label collapse makes the volume harder to interpret.
 
 **Why slab-based processing?** A 512³ grid with three float64 coordinate channels requires 3 GB. On a 5.7 GB system, this leaves insufficient room for the OS, Python, and the output arrays. Processing in 32-slice slabs reduces peak coordinate memory to ~192 MB (see Section 5.3) with negligible runtime cost.
