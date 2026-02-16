@@ -2,37 +2,57 @@
 
 ## 1. Architectural Overview
 
-The system is a specialized Geometric Multigrid (GMG) solver designed to resolve the elliptic Pressure Poisson Equation (PPE) on a computational domain with a virtual resolution of **$512^3$**. The solver is optimized for GPU architectures via Taichi Lang, specifically addressing the challenge of resolving hydraulic pressure fields across material contrasts exceeding $10^9$ (e.g., fluid vs. dural membranes).
+The system is a specialized Geometric Multigrid (GMG) solver designed to resolve the elliptic Pressure Poisson Equation (PPE) on a computational domain with a virtual resolution of **$N^3$** voxels, where $N$ is a power of two determined by the active simulation profile. The solver is optimized for GPU architectures via Taichi Lang, specifically addressing the challenge of resolving hydraulic pressure fields across material contrasts exceeding $10^9$ (e.g., fluid vs. dural membranes).
 
 The architecture is defined by three core principles:
 1. **Hybrid Memory Backend:** The grid hierarchy transitions from a Sparse (Bitmasked) backend at fine resolutions to a Dense (Padded) backend at coarse resolutions to optimize bandwidth.
 2. **Tri-Path Precision:** The system utilizes a tiered precision model (Robust Geometric MG, Lightweight Matrix-Free Diagonal, and Exact Residual) to dynamically arbitrate between solver throughput and physical fidelity based on the active inertial regime.
 3. **Topological Isolation:** The solver mathematically isolates the active physical domain from the inactive void space via zero-flux barriers, ensuring unconditional Neumann stability without branching logic in the inner loops.
 
+### 1.1 Simulation Profiles & Configuration Parameters
+
+The system is parameterized by two primary configuration values that determine the resolution, memory footprint, and multigrid depth:
+
+*   **$N$ (Virtual Grid Size):** The number of voxels per axis. Must be a power of two. The physical domain spans $N \times \Delta x$ millimeters per axis.
+*   **$\Delta x$ (Grid Spacing):** The physical side length of one voxel in millimeters.
+
+From these, the following quantities are derived:
+
+*   **Multigrid Depth $D$:** $D = \log_2(N / 8)$. The solver spans $D+1$ discrete levels ($L_0$ to $L_D$), with the coarsest level always being $8^3$.
+*   **Physical Domain Extent:** $N \cdot \Delta x$ mm per axis.
+
+Three standard profiles are defined:
+
+| Profile | $N$ | $\Delta x$ | Domain | Levels | Backend | Purpose |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **debug** | $256$ | $2.0\text{mm}$ | $512\text{mm}$ | $L_0 \dots L_5$ (6) | GPU (Vulkan) | Fast iteration, solver tuning |
+| **dev** | $512$ | $1.0\text{mm}$ | $512\text{mm}$ | $L_0 \dots L_6$ (7) | CPU | Anatomy validation, correctness |
+| **prod** | $512$ | $0.5\text{mm}$ | $256\text{mm}$ | $L_0 \dots L_6$ (7) | Cloud GPU | Full resolution results |
+
+The remainder of this specification uses the symbolic parameters $N$, $\Delta x$, and $D$ to describe all resolution-dependent quantities.
+
 ---
 
 ## 2. Grid Hierarchy & Memory Layout
 
-The solver spans seven discrete resolution levels ($L_0$ to $L_6$), utilizing a strict power-of-two descent.
+The solver spans $D+1$ discrete resolution levels ($L_0$ to $L_D$), utilizing a strict power-of-two descent.
 
 ### 2.1 Level Definitions
 
 | Level | Resolution | Backend Type | Precision | Role |
 | :--- | :--- | :--- | :--- | :--- |
-| **L0** | **$512^3$** | **Sparse** | **Standard f32 (P2G) / Transient DS (Solver)** | Primary Physics State ($P$) |
-| **L1** | **$256^3$** | **Sparse** | **Transient DS / Store f32** | Matrix-Free Correction |
-| **L2** | **$128^3$** | **Dense** | **Hybrid Virtual-Double** | **The Precision Firewall** (Resolves $10^9$ Contrast) |
-| **L3** | **$64^3$** | **Dense** | **Explicit f32** | High-Throughput Coarse |
-| **L4** | **$32^3$** | **Dense** | **Explicit f32** | High-Throughput Coarse |
-| **L5** | **$16^3$** | **Dense** | **Explicit f32** | High-Throughput Coarse |
-| **L6** | **$8^3$** | **Dense** | **Explicit f32** | Base Solver (Shared Memory) |
+| **$L_0$** | **$N^3$** | **Sparse** | **Standard f32 (P2G) / Transient DS (Solver)** | Primary Physics State ($P$) |
+| **$L_1$** | **$(N/2)^3$** | **Sparse** | **Transient DS / Store f32** | Matrix-Free Correction |
+| **$L_2$** | **$(N/4)^3$** | **Dense** | **Hybrid Virtual-Double** | **The Precision Firewall** (Resolves $10^9$ Contrast) |
+| **$L_3 \dots L_{D-1}$** | **$(N/8)^3 \dots 16^3$** | **Dense** | **Explicit f32** | High-Throughput Coarse |
+| **$L_D$** | **$8^3$** | **Dense** | **Explicit f32** | Base Solver (Shared Memory) |
 
-### 2.2 Dense Padding & Layout Strategy ($L_2 \dots L_6$)
+### 2.2 Dense Padding & Layout Strategy ($L_2 \dots L_D$)
 
 *   **Padding Protocol:**
-    All dense grid levels utilize a uniform **1-voxel padding** on all six faces. This expands the physical memory allocation to dimensions of $(N+2) \times (N+2) \times (N+2)$.
-    *   **Active Domain:** Indices $[1, N]$ contain valid physical state data ($P, v$) evolved by the solver.
-    *   **Ghost Zone:** Indices $0$ and $N+1$ represent the inactive vacuum or boundary condition. These voxels are pre-initialized to neutral identity values (e.g., $P=0$ or $A_{ii}=1$), allowing stencil kernels to read neighbor values unconditionally without boundary-check branching.
+    All dense grid levels utilize a uniform **1-voxel padding** on all six faces. For a level with nominal resolution $N_\ell^3$ (e.g., $N_\ell = N/4$ at $L_2$), this expands the physical memory allocation to $(N_\ell+2)^3$.
+    *   **Active Domain:** Indices $[1, N_\ell]$ contain valid physical state data ($P, v$) evolved by the solver.
+    *   **Ghost Zone:** Indices $0$ and $N_\ell+1$ represent the inactive vacuum or boundary condition. These voxels are pre-initialized to neutral identity values (e.g., $P=0$ or $A_{ii}=1$), allowing stencil kernels to read neighbor values unconditionally without boundary-check branching.
 
 *   **Isomorphic Tiling Constraint:**
     To enforce deterministic parallelism and maximize GPU occupancy during the Sparse $\to$ Dense transition, the active leaf block size of the $L_1$ Sparse SNode level is strictly constrained to **$8 \times 8 \times 8$**.
@@ -63,47 +83,47 @@ To reconcile the conflicting requirements of high-velocity inertial dynamics (Re
 ### 3.1 Path A: The Lightweight Preconditioner (Matrix-Free Diagonal)
 * **Role:** The "Lightweight" path. It serves as the default preconditioner for **Regime I (Dynamic Inertial)**, where the physics is dominated by local acoustic wave propagation rather than global diffusion.
 * **Storage Strategy (Matrix-Free):** This path utilizes **Zero Storage**. It does not access the cached $L_2$ arrays.
-* **Execution:** The diagonal scaling factor $M^{-1}_{ii}$ is reconstructed on-the-fly during the PCG descent step. The kernel reads the local `u8` material index, retrieves the permeability from the global LUT, and sums the harmonic means of the six neighbors to compute the diagonal entry $A_{ii}$.
-$$ z_i = \frac{r_i}{\sum_{faces} T_{face}(\mathbf{u8})} $$
-* **Latency:** By bypassing the memory clearing, upscaling, and geometric reconstruction phases required by Path A, this path allows the solver to begin iterating immediately at the start of a frame. It effectively normalizes the $10^9$ contrast ratio without the overhead of a grid hierarchy.
+* **Execution:** The diagonal scaling factor $M^{-1}_{ii}$ is reconstructed on-the-fly during the PCG descent step. The kernel reads the local `u8` material index, retrieves the **isotropic base permeability** $k_{iso}$ from the Dual Global LUT, and sums the harmonic means of the six neighbors to compute the diagonal entry $A_{ii}$. The anisotropic fiber contribution ($k_{fiber} \cdot \mathbf{M}_0$) is intentionally omitted to preserve the zero-storage, lightweight character of this path; the exact anisotropic physics are enforced by the Path C residual evaluation.
+$$ z_i = \frac{r_i}{\sum_{faces} T_{face}(k_{iso}[\mathbf{u8}])} $$
+* **Latency:** By bypassing the memory clearing, upscaling, and geometric reconstruction phases required by Path B, this path allows the solver to begin iterating immediately at the start of a frame. It effectively normalizes the $10^9$ contrast ratio without the overhead of a grid hierarchy.
 
 ### 3.2 Path B: The Robust Preconditioner (Geometric Multigrid)
 
 *   **Role:** The "Heavyweight" path. It acts as the primary preconditioner for **Regime II (Quasi-Static)** and **Regime III (Seepage)**, and serves as the rigorous fail-safe fallback when the lightweight Path A fails to converge due to complex hydrostatic bottlenecks.
 
 *   **Storage Strategy (Cascaded Precision):** The linear operator storage utilizes a **Hybrid Virtual-Double** architecture to reconcile physical fidelity with memory bandwidth limitations.
-    *   **The Firewall ($L_2$):** The dense operator at Level 2 ($256^3$) utilizes a split-precision layout to minimize memory footprint while preventing "Hydraulic Tunneling" or artificial blockage due to underflow.
+    *   **The Firewall ($L_2$):** The dense operator at Level 2 ($(N/4)^3$) utilizes a split-precision layout to minimize memory footprint while preventing "Hydraulic Tunneling" or artificial blockage due to underflow.
         *   **Transmissibility ($T$):** Stored in **Single Precision (`f32`)**. Since hydraulic conductance values represent physical scalars within the range $[10^{-12}, 1.0]$, they fit within the standard floating-point dynamic range without quantization loss.
         *   **Diagonal ($A_{ii}$):** Stored in **Double-Single Precision (`vec2f`)**. As the diagonal represents the summation of all neighbor connections ($\sum T$), it mixes disparate magnitudes (e.g., bulk fluid $1.0$ vs. membrane $10^{-9}$). Storing the High and Low words ensures the contribution of high-resistance barriers is not lost to rounding errors during operator construction.
-    *   **The Accelerator ($L_3 \dots L_6$):** Once the grid coarsens past $L_2$, geometric averaging dominates local contrasts. These levels store operators strictly in **Single Precision (`f32`)** to maximize SIMD throughput and minimize VRAM footprint during the deep V-Cycle smoothing steps.
+    *   **The Accelerator ($L_3 \dots L_D$):** Once the grid coarsens past $L_2$, geometric averaging dominates local contrasts. These levels store operators strictly in **Single Precision (`f32`)** to maximize SIMD throughput and minimize VRAM footprint during the deep V-Cycle smoothing steps.
 
 *   **Amortization:** Because this path relies on explicit storage, it incurs a setup cost (the **"Split-Stage Block-Local"** rebuild). To maximize efficiency, these operators are **Cached**. They are not rebuilt every frame but are maintained over time using the Reactive Spectral-Guided Maintenance (RSGM) protocol.
 
 *   **Execution & Topology:** The V-Cycle executes using **Alternating Direction Line Relaxation (ADLR)** to resolve anisotropic error modes.
     *   **At $L_2$ (Transient Double-Single / Exact Topology):** The solver utilizes **Transient Precision** arithmetic to invert the linear system along axial lines. The Thomas Algorithm (TDMA) kernel loads the `vec2f` Diagonal and `f32` Transmissibility, performing the critical pivot subtraction ($D' = A_{ii} - T \cdot C_{prev}$) using mixed-precision intrinsics. This resolves the weak coupling across semi-permeable membranes ($T \approx 10^{-9}$) by preserving the non-zero residue in the denominator, effectively forcing fluid flux through high-contrast barriers.
-* **At $L_3 \dots L_6$ (`f32` / Safe-Floor Topology):** The solver operates on a clamped topology where micro-barriers are treated as **Minimum Conductance Channels ($T=\epsilon$)**. In this regime, the tridiagonal matrix remains globally coupled even across high-resistance zones. The solver resolves the global pressure distribution by enforcing a minimum viable flux through constricted channels, ensuring that pressure gradients successfully propagate across the domain to guide the fine-scale solver, while strictly maintaining topological isolation at true zero-flux boundaries.
+* **At $L_3 \dots L_D$ (`f32` / Safe-Floor Topology):** The solver operates on a clamped topology where micro-barriers are treated as **Minimum Conductance Channels ($T=\epsilon$)**. In this regime, the tridiagonal matrix remains globally coupled even across high-resistance zones. The solver resolves the global pressure distribution by enforcing a minimum viable flux through constricted channels, ensuring that pressure gradients successfully propagate across the domain to guide the fine-scale solver, while strictly maintaining topological isolation at true zero-flux boundaries.
 
 
 ### 3.3 Path C: The Precise Judge (The Residual)
 
 *   **Role:** The "Ground Truth." This path calculates the exact physical error $r = b - \mathbf{A}x$ to drive global convergence and govern the transition between Path A and Path B.
-*   **Storage Strategy (Matrix-Free):** Like Path B, the operator is not stored. It relies strictly on the instantaneous Lagrangian configuration of the particles.
+*   **Storage Strategy (Matrix-Free):** Like Path A, this path does not access pre-computed stored operators. The operator is reconstructed on-the-fly from the instantaneous Lagrangian configuration of the particles.
 *   **Precision (Transient Double-Single):** To prevent "Hydraulic Tunneling" (where faint fluxes are lost to catastrophic cancellation), the kernel utilizes **Transient Precision** for flux integration. While the final residual vector is stored in **Single Precision (`f32`)**, all intermediate divergence calculations are performed using **Double-Single (`vec2f`)** accumulators within the GPU registers.
 *   **Reconstruction:** The kernel reconstructs the flux for each face using the `u8` material indices. These fluxes are aggregated into a local `vec2f` register using mixed-precision addition intrinsics. This technique resolves the minute net flux imbalance ($r \approx 10^{-15}$) across sealed boundaries, even when the gross flux magnitudes are large.
 *   **Usage:**
     1.  **Convergence Check:** It determines when the solver has finished.
-    2.  **Path Arbitration:** If the residual fails to decrease efficiently while using Path B (Diagonal), this judge triggers the "Fallback Protocol," forcing a switch to Path A (Multigrid).
+    2.  **Path Arbitration:** If the residual fails to decrease efficiently while using Path A (Diagonal), this judge triggers the "Fallback Protocol," forcing a switch to Path B (Multigrid).
     3.  **Correction:** It generates the high-precision defect vector used by both preconditioners, ensuring that even if Path A or B uses a simplified topology, the final solution strictly respects the exact boundaries.
 
 ---
 
 ### 4. Operator Topology & Initialization
 
-This phase manages the construction of the explicit `f32` linear operators for the coarse dense levels ($L_2 \dots L_6$). To minimize computational overhead, this process is governed by a strict **Conditional Execution Protocol**.
+This phase manages the construction of the explicit `f32` linear operators for the coarse dense levels ($L_2 \dots L_D$). To minimize computational overhead, this process is governed by a strict **Conditional Execution Protocol**.
 
 ### 4.1 Reactive Spectral-Guided Maintenance (RSGM)
 
-The validity of the cached linear operators ($L_2 \dots L_6$) is governed by a **Reactive Protocol** rather than a predictive geometric metric. Instead of attempting to predict when the operator has degraded based on particle velocity or displacement, the system monitors the actual convergence efficiency of the linear solver. This decouples the cost of topological reconstruction from the physical kinematics, allowing the system to tolerate significant geometric drift so long as the cached operator continues to effectively guide the solver toward the solution.
+The validity of the cached linear operators ($L_2 \dots L_D$) is governed by a **Reactive Protocol** rather than a predictive geometric metric. Instead of attempting to predict when the operator has degraded based on particle velocity or displacement, the system monitors the actual convergence efficiency of the linear solver. This decouples the cost of topological reconstruction from the physical kinematics, allowing the system to tolerate significant geometric drift so long as the cached operator continues to effectively guide the solver toward the solution.
 
 **4.1.1 The Spectral Convergence Metric ($\rho$)**
 The decision to refresh the preconditioner is derived strictly from the algebraic behavior of the solver. The system calculates the scalar convergence rate $\rho$ at the conclusion of every Multigrid (Path B) execution:
@@ -125,12 +145,12 @@ The system acts as a state machine that persists the dense operator data across 
     *   **Action:** The `is_topology_dirty` flag is set to **True**, initiating the Split-Stage maintenance sequence:
         1.  **Global Dense Clear:** The system explicitly resets the $L_2$ dense arrays to zero via a high-bandwidth memset.
         2.  **Block-Local Flux Integration:** The shared-memory reduction kernel executes over active $L_1$ blocks to rigorously populate the $L_2$ firewall.
-        3.  **Recursive Propagation:** The operators are downsampled from $L_2$ through $L_6$, updating the coarse-grid accelerators.
+        3.  **Recursive Propagation:** The operators are downsampled from $L_2$ through $L_D$, updating the coarse-grid accelerators.
         4.  **Reset:** The spectral monitoring state is reset for the new frame.
 
 ### 4.1.3 Regime Arbitration & The Hybrid Fallback
 
-This protocol automatically adapts the maintenance frequency to the simulation regime by arbitrating between the two solver paths (see Section 3).
+This protocol automatically adapts the maintenance frequency to the simulation regime by arbitrating between the solver paths (see Sections 3.1–3.3 above).
 
 *   **Dynamic Inertial (Regime I):**
     *   **Path Selection:** The system defaults to **Path A (Matrix-Free Diagonal)**.
@@ -142,7 +162,7 @@ This protocol automatically adapts the maintenance frequency to the simulation r
     *   **Maintenance:** The RSGM protocol is **Active**. In these regimes, particle motion is slow or zero. Consequently, the spectral health $\rho$ remains stable for long periods (tens to hundreds of frames), and the system naturally maintains State A (Clean), minimizing overhead during long-term equilibrium solves.
 
 ### 4.2 Storage Format (Persistent Cache)
-The linear operators for the coarse grid levels ($L_2 \dots L_6$) are stored in persistent global memory arrays. These arrays facilitate the caching mechanism by preserving the geometric conductance of the domain between simulation steps. To optimize memory bandwidth while maintaining numerical stability at the "Precision Firewall," the storage format varies by level.
+The linear operators for the coarse grid levels ($L_2 \dots L_D$) are stored in persistent global memory arrays. These arrays facilitate the caching mechanism by preserving the geometric conductance of the domain between simulation steps. To optimize memory bandwidth while maintaining numerical stability at the "Precision Firewall," the storage format varies by level.
 
 * **Format:** Symmetric 7-point Laplacian stencil.
 * **Components:** The operator is decomposed into a Diagonal component ($A_{ii}$) and three axial Transmissibility components ($T_{x}, T_{y}, T_{z}$).
@@ -155,7 +175,7 @@ At Level 2, the dense operator utilizes a mixed-precision storage strategy to ac
 * **Diagonal ($A_{ii}$):** Stored in **Double-Single Precision (`vec2f`)**.
 * The diagonal represents the summation of all six neighbor connections ($\sum T$). This summation mixes disparate magnitudes (e.g., summing a bulk fluid connection of $1.0$ with a membrane connection of $10^{-9}$). The storage utilizes a two-component vector (High Word, Low Word) to ensure that the contribution of high-resistance barriers is preserved in the lower bits and is not erased by rounding errors against the bulk flow.
 
-**4.2.2 The Standard Layout ($L_3 \dots L_6$)**
+**4.2.2 The Standard Layout ($L_3 \dots L_D$)**
 At the coarser levels, where geometric averaging dominates local contrasts, both the Transmissibility and Diagonal components are stored in standard **Single Precision (`f32`)**.
 
 **4.2.3 Topological Data Mapping**
@@ -177,7 +197,7 @@ To minimize memory footprint, the system stores only the positive-axis coefficie
 
 ### 4.3 Split-Stage Block-Local Upscaling (Rebuild Step)
 
-When `is_topology_dirty` is **True**, the system executes a decoupled initialization sequence to populate the cascaded precision operators ($L_2 \dots L_6$). This protocol replaces monolithic kernels with a split-stage pipeline designed to isolate memory bandwidth operations from high-precision arithmetic, maximizing GPU occupancy and ensuring compatibility with Graph API execution models.
+When `is_topology_dirty` is **True**, the system executes a decoupled initialization sequence to populate the cascaded precision operators ($L_2 \dots L_D$). This protocol replaces monolithic kernels with a split-stage pipeline designed to isolate memory bandwidth operations from high-precision arithmetic, maximizing GPU occupancy and ensuring compatibility with Graph API execution models.
 
 **Stage 1: Global Dense Clear ($L_2$ Reset)**
 * **Operational Scope:** A high-bandwidth kernel iterates linearly over the entire **Dense** $L_2$ memory range.
@@ -189,16 +209,16 @@ When `is_topology_dirty` is **True**, the system executes a decoupled initializa
 * **Architecture:** Sparse-Driven Shared-Memory Reduction.
 * **Execution Topology:** The kernel utilizes **Indirect Dispatch**, iterating strictly over the **Active Pointer Blocks** of the $L_1$ Sparse Hierarchy.
 * **Thread Mapping:**
-* **One Block per Tile:** One GPU Thread Block is assigned to exactly one Active Sparse Leaf Block ($4 \times 4 \times 4$ voxels).
+* **One Block per Tile:** One GPU Thread Block is assigned to exactly one Active $L_1$ Sparse Leaf Block ($8 \times 8 \times 8$ voxels), which maps to a $4 \times 4 \times 4$ destination region at $L_2$ (64 threads).
 * **Locality:** This 1:1 mapping guarantees that all fine-scale geometric data required to compute the coarse voxel flux resides within the thread group, enabling efficient L1 caching.
 * **Execution Protocol:**
-1. **Collaborative Load (L1 Cache):** Threads cooperatively load the fine-scale `u8` Material Indices and LUT IDs from Global Memory into a `ti.simt.block.shared_array`. This consolidates memory traffic into coalesced bursts.
+1. **Collaborative Load (L1 Cache):** Threads cooperatively load the fine-scale `u8` Material Indices, LUT IDs, and the diagonal elements of the **Structure Tensor ($\mathbf{M}_0$)** from Global Memory into a `ti.simt.block.shared_array`. This consolidates memory traffic into coalesced bursts. The per-face transmissibility is computed using the axis-projected anisotropic permeability $K_{axis} = k_{iso} + k_{fiber} \cdot \mathbf{M}_0[axis, axis]$ before harmonic averaging.
 2. **In-Block Reduction:** The thread block performs a parallel reduction (tree-sum) within Shared Memory to aggregate the four fine sub-face fluxes into a single coarse face flux.
 3. **Coalesced Write:** The final aggregated result is written directly to the **Dense $L_2$ Transmissibility Array** in `f32`. Since spatially adjacent fine-scale fluxes typically possess similar magnitudes (e.g., all fluid or all solid), the summation into single-precision retains sufficient fidelity for the storage of the conductance term.
 
 **Stage 3: Recursive Coarsening & The Topological Floor**
 
-* **Target:** Levels $L_3 \dots L_6$ Dense Arrays (Single Precision).
+* **Target:** Levels $L_3 \dots L_D$ Dense Arrays (Single Precision).
 * **Execution:** The system recursively builds the coarser operators by summing the transmissibilities of the preceding finer level (e.g., $L_2 \to L_3$, then $L_3 \to L_4$).
 * **The Connectivity-Preserving Clamp ($L_2 \to L_3$):**
 When downsampling from the Hybrid Firewall ($L_2$) to the Single-Precision Accelerator ($L_3$), the system applies a three-state mapping to the aggregated transmissibility ($T_{sum}$) to ensure the coarse graph remains topologically isomorphic to the fine grid.
@@ -213,11 +233,11 @@ When downsampling from the Hybrid Firewall ($L_2$) to the Single-Precision Accel
 *   **Row Sum ($L_2$):** The diagonal is computed by summing the *stored* transmissibility values of the six neighbor faces. To prevent the erasure of high-resistance barrier coefficients ($10^{-9}$) by bulk fluid coefficients ($1.0$), this summation utilizes **Transient Double-Single Arithmetic**.
     *   **Logic:** The kernel reads the six `f32` neighbor transmissibilities and aggregates them into a local `vec2f` register. This aggregation utilizes **Error-Free Transformation (EFT)** logic to capture the rounding error of each addition in the lower-order word of the vector, creating an exact accumulation of the disparate magnitudes.
     *   **Storage:** The result is stored in the `vec2f` Diagonal array. This ensures that the implicitly defined barrier residue ($A_{ii} - \sum T_{fluid}$) remains non-zero and bit-exact.
-*   **Row Sum ($L_3 \dots L_6$):** The sum is performed in standard `f32`, consistent with the Safe-Floor topology.
+*   **Row Sum ($L_3 \dots L_D$):** The sum is performed in standard `f32`, consistent with the Safe-Floor topology.
 *   **Sentinel Identity:** If $A_{ii} == 0.0$ (Vacuum), the diagonal is forced to $1.0$ to maintain matrix regularity ($1 \cdot P = 0$) in void regions.
 
 ### 4.4 Geometric Upscaling Theory (Conservative Transmissibility)
-To generate coarse-level operators ($L_2 \dots L_6$) that rigorously respect microscopic barriers, the system utilizes **Conservative Transmissibility Upscaling (CTU)**. This method relies on the principle that the flux capacity of a large interface is the sum of the flux capacities of its constituent sub-interfaces (the Parallel Resistor Model).
+To generate coarse-level operators ($L_2 \dots L_D$) that rigorously respect microscopic barriers, the system utilizes **Conservative Transmissibility Upscaling (CTU)**. This method relies on the principle that the flux capacity of a large interface is the sum of the flux capacities of its constituent sub-interfaces (the Parallel Resistor Model).
 
 **4.4.1 Flux Conservation Principle**
 Rather than averaging material properties (permeability), the system upscales the structural conductance values directly. For a coarse face $F$ composed of a set of fine faces $\{f_i\}$, the coarse transmissibility $T_F$ is defined as:
@@ -230,7 +250,7 @@ The upscaling process propagates from the finest dense level up to the coarsest 
 2.  **$L_k \to L_{k+1}$:** Handled via recursive summation. The transmissibility of a face at Level $k+1$ is the arithmetic sum of the four corresponding spatially-aligned sub-faces at Level $k$.
 
 **4.4.3 Implicit Topology & Connectivity Rules**
-In the coarse-grid solver ($L_2 \dots L_6$), the explicit tracking of material states (Fluid, Solid, Air) is obsoleted. Instead, the physics are governed entirely by the **Implicit Topology** of the transmissibility field ($T_{axis}$). The solver kernel blindly executes flux operations, relying on the value of $T$ to enforce complex boundary conditions and geometric constraints.
+In the coarse-grid solver ($L_2 \dots L_D$), the explicit tracking of material states (Fluid, Solid, Air) is obsoleted. Instead, the physics are governed entirely by the **Implicit Topology** of the transmissibility field ($T_{axis}$). The solver kernel blindly executes flux operations, relying on the value of $T$ to enforce complex boundary conditions and geometric constraints.
 
 * **Active Hydraulic Connectivity ($T > 0$):**
 A non-zero transmissibility value between two nodes implies the existence of a valid, face-aligned physical path on the fine grid. Because the upscaling process strictly integrates surface fluxes, a positive $T_{coarse}$ guarantees that the connected volume is not just geometrically adjacent, but topologically amenable to flow.
@@ -285,15 +305,15 @@ To guarantee race-free writes, maximize memory bandwidth, and handle vacuum topo
 *   **Precision Casting:** This step handles the transition from the "Firewall" to the "Accelerator." The aggregated **Double-Single** residual sum is cast to **Single Precision (`f32`)** for storage in the $L_3$ array.
 *   **Validity:** Since the residual represents a macroscopic mass deficit—and local high-frequency errors have already been resolved by the $L_2$ smoother—this casting is numerically safe for the coarse-grid correction.
 
-**4. $L_3 \to L_6$ (Dense $\to$ Dense):**
+**4. $L_3 \to L_D$ (Dense $\to$ Dense):**
 *   **Recursive Summation:** For the remaining levels, the kernel performs standard `f32` summation. For every coarse voxel, the residuals of the eight child voxels are added together:
     $$ r_{coarse}^{(i,j,k)} = \sum_{x=0}^1 \sum_{y=0}^1 \sum_{z=0}^1 r_{fine}^{(2i+x, 2j+y, 2k+z)} $$
-*   **Conservation of Defect:** This summation maintains the integral of the residual. The global mass error calculated at the coarsest level ($L_6$) is algebraically equivalent to the global mass error at the finest level ($L_0$), ensuring the base solver addresses the true net defect of the system.
+*   **Conservation of Defect:** This summation maintains the integral of the residual. The global mass error calculated at the coarsest level ($L_D$) is algebraically equivalent to the global mass error at the finest level ($L_0$), ensuring the base solver addresses the true net defect of the system.
 *   **Topological Consistency:** Because ghost voxels (padding) are pre-initialized to $0.0$, summation operations at boundaries naturally contribute zero flux to coarser vacuum regions, maintaining correct domain topology without conditional branching.
 
 ---
 
-### 5.2 The Bottom Solver ($L_6$)
+### 5.2 The Bottom Solver ($L_D$)
 The coarsest level ($8^3$) represents the global equilibrium and is solved exactly using a single GPU thread block. This kernel is highly optimized for register throughput and L1 cache latency, bypassing Global Memory during the iterative solution.
 
 * **Shared Memory Allocation Strategy:**
@@ -322,8 +342,8 @@ The solver executes for a fixed number of iterations ($N=64$) to ensure converge
 
 The correction vector $z$ is interpolated back up the grid hierarchy to update the fine-scale solution. To prevent "Correction Bleeding"—where high-magnitude pressure corrections in fluid channels leak into neighboring solids due to geometric averaging—the system utilizes a **Matrix-Dependent Prolongation** strategy combined with robust line smoothing.
 
-**1. Recursive Prolongation ($L_6 \to \dots \to L_2$):**
-The system iteratively upscales the correction from the coarsest level ($L_6$) down to the precision firewall ($L_2$) using physics-aware operators.
+**1. Recursive Prolongation ($L_D \to \dots \to L_2$):**
+The system iteratively upscales the correction from the coarsest level ($L_D$) down to the precision firewall ($L_2$) using physics-aware operators.
 
 * **Operator-Induced Interpolation:** The interpolation weights for a child voxel are not fixed geometric constants but are derived dynamically from the **Transmissibility ($T$)** coefficients of the **Child (Destination) Level**.
 * **The Physical Throttle ($L_3 \to L_2$):** Crucially, when prolonging from the Accelerator ($L_3$) to the Firewall ($L_2$), the weights are calculated using the **Exact Hybrid Transmissibility** stored at $L_2$ (e.g., $10^{-9}$), *not* the clamped Epsilon value used at $L_3$ ($10^{-7}$). This ensures that while the coarse solver was allowed to pass flux easily to maintain connectivity, the resulting correction magnitude is mathematically restricted by the true physical resistance before entering the fine-grid state.
@@ -355,14 +375,14 @@ The solver architecture distinctly separates the definition of the physical erro
     The convergence criterion is governed exclusively by the residual vector $r = b - \mathbf{A}_{exact}x$. This calculation is performed on the $L_0$ grid using the **current frame's** particle distribution via the `u8` lookup. Because the residual kernel always evaluates the instantaneous geometry of the material points, the solver enforces the current boundary conditions regardless of the state of the coarse operators.
 
 *   **The Heuristic Guide (The Preconditioner):**
-    The V-Cycle serves to generate an approximate correction vector $z \approx \mathbf{A}^{-1}r$. By utilizing the cached `f32` operators ($L_2 \dots L_6$), the preconditioner directs the solver based on the cached topological state, which may contain slight temporal latencies regarding barrier states.
+    The V-Cycle serves to generate an approximate correction vector $z \approx \mathbf{A}^{-1}r$. By utilizing the cached `f32` operators ($L_2 \dots L_D$), the preconditioner directs the solver based on the cached topological state, which may contain slight temporal latencies regarding barrier states.
 
 *   **Self-Correction:**
     If the cached preconditioner generates a search direction that violates the current physics (e.g., suggesting flux through a recently closed barrier), the exact residual calculation in the subsequent PCG iteration detects the resulting non-zero error. The Conjugate Gradient algorithm naturally orthogonalizes against this invalid component, generating a corrective search vector that strictly respects the true boundary.
 
 ### 5.4.2 The Spectral Watchdog (Consistency Protocol)
 
-To reconcile the computational efficiency of cached operators with the potential for "Topological Snapping" (e.g., instantaneous tissue rupture or valve closure), the system employs an active spectral monitoring protocol. This mechanism detects when the cached preconditioner ($L_2 \dots L_6$) has become spectrally orthogonal to the physical reality ($L_0$), preventing solver cycles from being wasted on a divergent system.
+To reconcile the computational efficiency of cached operators with the potential for "Topological Snapping" (e.g., instantaneous tissue rupture or valve closure), the system employs an active spectral monitoring protocol. This mechanism detects when the cached preconditioner ($L_2 \dots L_D$) has become spectrally orthogonal to the physical reality ($L_0$), preventing solver cycles from being wasted on a divergent system.
 
 **5.4.2.1 Convergence Rate Metric**
 At every iteration $k$ of the PCG loop, the solver computes the scalar convergence rate $\rho_k$, defined as the ratio of the current residual norm to the previous residual norm:
@@ -386,7 +406,7 @@ The Watchdog evaluates two distinct failure modes based on the iteration phase:
 If either trigger condition is met, the solver executes an interrupt routine:
 1. **Interrupt:** The PCG iteration loop is terminated immediately.
 2. **Force Dirty State:** The `is_topology_dirty` flag is forcibly set to **True**.
-3. **Immediate Reconstruction:** The execution pipeline suspends the solver logic and runs the "Fused Upscaling" kernel to rebuild the dense operators ($L_2 \dots L_6$) based on the current instantaneous $L_0$ configuration.
+3. **Immediate Reconstruction:** The execution pipeline suspends the solver logic and runs the "Fused Upscaling" kernel to rebuild the dense operators ($L_2 \dots L_D$) based on the current instantaneous $L_0$ configuration.
 4. **Solver Restart:** The PCG state is reset. The current pressure estimate $x$ is retained as the initial guess to preserve progress, but the search directions $d$ and residuals $r$ are re-initialized against the newly reconstructed operators.
 
 This protocol ensures that "Water Hammer" events—where topology changes abruptly—are detected and resolved with a latency of only 2-3 iterations, preserving real-time performance.
@@ -468,14 +488,14 @@ The line solver is compiled in two distinct variants to support the cascaded pre
 
 *   **The Hybrid Firewall Kernel ($L_2$):**
     This kernel implements a **Transient Double-Single** variant of the Thomas Algorithm.
-    *   **Capacity:** At $L_2$ ($128^3$), a single grid line contains 128 voxels. The storage required per line—Diagonal (`vec2f`), Transmissibility (`f32`), and RHS (`f32`)—fits within the Shared Memory capacity of a single Streaming Multiprocessor (SM), enabling the Pencil-Staging protocol without register spilling.
+    *   **Capacity:** At $L_2$ ($(N/4)^3$), a single grid line contains $N/4$ voxels. The storage required per line—Diagonal (`vec2f`), Transmissibility (`f32`), and RHS (`f32`)—fits within the Shared Memory capacity of a single Streaming Multiprocessor (SM), enabling the Pencil-Staging protocol without register spilling.
     *   **Hybrid Load:** The Diagonal is loaded into the shared tile as `vec2f` (High/Low words), while Transmissibility is loaded as `f32`.
     *   **Transient Pivot:** During the forward elimination phase within Shared Memory, the denominator calculation ($D' = A_{ii} - T \cdot C_{prev}$) is performed using mixed-precision intrinsics. This utilizes **Error-Free Transformation (EFT)** logic to capture the subtraction error in the lower-order word of the `vec2f` register. This guarantees that microscopic barrier residues ($10^{-9}$) are preserved even when subtracted from bulk fluid coefficients ($1.0$).
 
-*   **The Accelerator Kernel ($L_3 \dots L_6$):**
+*   **The Accelerator Kernel ($L_3 \dots L_D$):**
     This kernel is instantiated with **Single Precision (`f32`)**.
     *   **Topology:** It operates on the "Safe-Floor" topology ($T \ge \epsilon$).
-    *   **Execution:** Since grid dimensions are small ($64^3 \downarrow$), the entire pencil allows for full register residency during the sweep. The solver equilibrates pressure across high-contrast restrictions by treating them as minimum conductance channels, ensuring valid search directions for the global system.
+    *   **Execution:** Since grid dimensions are small ($(N/8)^3$ and below), the entire pencil allows for full register residency during the sweep. The solver equilibrates pressure across high-contrast restrictions by treating them as minimum conductance channels, ensuring valid search directions for the global system.
 
 **Boundary & Vacuum Logic:**
 Explicit padding voxels (Indices $0$ and $N+1$) serve as fixed boundary conditions. During the **Coalesced Load** phase, these ghost values are pulled into the Shared Memory tile along with the active data. This enables branchless execution of the Thomas Algorithm within the tile. For Vacuum voxels residing within the active range ($A_{ii}=1, T=0$), the system simplifies to the identity equation ($1 \cdot z = 0$), ensuring the correction vector remains stable at $0.0$ in the void.
@@ -493,8 +513,10 @@ The kernel initializes a local high-precision accumulator (`vec2f`) to zero. Mat
 **2. High-Fidelity Interface Flux Reconstruction**
 The divergence is computed by summing the signed fluxes $Q$ entering or leaving the node through its six faces. Crucially, the calculation must respect the dynamic boundary value set by the Volume Compensator.
 
-* **Permeability Retrieval (`f64`):** The kernel reads the `u8` material index and retrieves the physical permeability $K$ directly from the Global LUT in **Double Precision (`f64`)**. This ensures that the raw coefficients for high-contrast barriers (e.g., $10^{-11}$) are loaded with full bit-wise fidelity.
-* **Transient Flux Calculation (`vec2f`):** The transmissibility $T_{face}$ (harmonic mean of $K$) and the pressure difference $\Delta P$ are computed.
+* **Anisotropic Permeability Retrieval (`f64`):** The kernel reads the `u8` material index and retrieves the physical permeability pair $(k_{iso}, k_{fiber})$ from the **Dual Global LUT** in **Double Precision (`f64`)**. The kernel then reads the Structure Tensor diagonal element $\mathbf{M}_0[axis, axis]$ from the Tier 2 grid field to compute the axis-projected permeability:
+$$ K_{axis} = k_{iso} + k_{fiber} \cdot \mathbf{M}_0[axis, axis] $$
+This ensures that the directional permeability for high-contrast barriers (e.g., $10^{-11}$) and fiber-aligned flow paths is loaded with full bit-wise fidelity. For isotropic materials ($k_{fiber} = 0$), this reduces to the scalar lookup.
+* **Transient Flux Calculation (`vec2f`):** The transmissibility $T_{face}$ (harmonic mean of the axis-projected $K_{axis}$ values of the two adjacent nodes) and the pressure difference $\Delta P$ are computed.
 $$ Q_{face} = T_{face} \cdot (P_{neighbor} - P_{center}) $$
 * **Boundary Lookup Protocol:** To enforce the Monro-Kellie logic, the kernel conditionally retrieves $P_{neighbor}$ based on the neighbor's material state:
 * **Active Fluid (1..254):** Read $P$ directly from the grid state.
@@ -517,7 +539,7 @@ The solver utilizes a **Tri-State Topology** to distinguish between sealed inter
 * **State 1: The Active Domain (Fluid/Tissue)**
 * **Definition:** Voxels containing active particles ($N_p > 0$) or damaged solid material points. These are assigned Material IDs `1..254`.
 * **Solver Behavior:** These voxels are actively solved for the Pressure field $P$ (Degrees of Freedom).
-* **Interface Physics:** Connections between two active voxels represent standard internal flow. The transmissibility $T$ is calculated as the harmonic mean of the permeability $K$ of the adjacent nodes, governing mass-conserving Darcy flow.
+* **Interface Physics:** Connections between two active voxels represent standard internal flow. The transmissibility $T$ is calculated as the harmonic mean of the **axis-projected permeability** $K_{axis}$ of the two adjacent nodes, where $K_{axis} = k_{iso} + k_{fiber} \cdot \mathbf{M}_0[axis, axis]$ for the face normal direction. This Two-Point Flux Approximation (TPFA) governs mass-conserving anisotropic Darcy flow.
 
 * **State 2: The Air Halo (Dynamic Monro-Kellie Boundary)**
 * **Definition:** A sparsely allocated boundary layer (one voxel thick) representing the interface between the fluid domain and the skull/atmosphere. This state is assigned the reserved Material ID `255`.
@@ -535,7 +557,7 @@ Here, $P_{halo}$ is the global correction scalar computed by the Alpha-Coupled P
 * **Solver Behavior:** This state enforces a **Homogeneous Neumann Condition** ($\partial P / \partial n = 0$).
 * **Interface Physics:** If an Active voxel neighbors a Vacuum voxel (which occurs when the neighbor's SDF query indicated it was "Inside" the skull/bone), the connection is treated as a solid wall. The transmissibility is strictly forced to $0.0$, causing fluid pressure to reflect off the boundary with zero mass flux leaving the domain.
 
-* **Coarse-Scale Consistency ($L_2 \dots L_6$):**
+* **Coarse-Scale Consistency ($L_2 \dots L_D$):**
 * **Upscaling:** The "Fused CTU" kernel respects this tri-state logic when aggregating fluxes for the coarse dense arrays.
 * **Air Flux:** Fluxes across Active-Air interfaces are summed into the coarse transmissibility. This ensures that the dynamic boundary pressure ($P_{halo}$) propagates correctly from the coarse grid down to the fine grid during the V-Cycle.
 * **Vacuum Flux:** Fluxes across Active-Vacuum interfaces sum to zero, ensuring that sealed boundaries remain sealed even at the coarsest level of the Multigrid hierarchy.
@@ -547,15 +569,15 @@ Here, $P_{halo}$ is the global correction scalar computed by the Alpha-Coupled P
 ### I. Spatial Domain & Hierarchical Memory Layout
 
 **1.1 Virtual Address Space**
-The computational domain is defined as a bounded cubic volume with a virtual resolution of **$512^3$** voxels. This creates a global Cartesian coordinate system serving as the reference frame for both Eulerian (grid) and Lagrangian (particle) data.
-* **Virtualization:** The domain is sparsely virtualized. Memory is not pre-allocated for the full $512^3$ volume. Instead, the system allocates physical memory pages only for regions containing active material (Solid or Fluid), reducing the memory footprint from potential Gigabytes to Megabytes.
+The computational domain is defined as a bounded cubic volume with a virtual resolution of **$N^3$** voxels (see Section 1.1 for the definition of $N$ and $\Delta x$). This creates a global Cartesian coordinate system serving as the reference frame for both Eulerian (grid) and Lagrangian (particle) data.
+* **Virtualization:** The domain is sparsely virtualized. Memory is not pre-allocated for the full $N^3$ volume. Instead, the system allocates physical memory pages only for regions containing active material (Solid or Fluid), reducing the memory footprint from potential Gigabytes to Megabytes.
 * **Coordinate Unification:** The coordinate system is normalized such that grid indices $(i, j, k)$ map directly to the SNode accessor keys, ensuring seamless coupling between particle positions and grid nodes.
 
 **1.2 Sparse SNode Topology**
 Instead of manual address hashing, the system leverages the Taichi SNode (Sparse Node) system to define a multi-level pointer hierarchy. This structure automatically handles the mapping of 3D coordinates to linear memory.
 
-* **Tree Architecture:** The memory layout is defined as a two-level sparse tree optimized for the $512^3$ domain:
-1. **Level 1 (Coarse Pointers):** A dense pointer array acting as the Page Directory. It subdivides the domain into a grid of **$64 \times 64 \times 64$** pointer blocks.
+* **Tree Architecture:** The memory layout is defined as a two-level sparse tree optimized for the $N^3$ domain:
+1. **Level 1 (Coarse Pointers):** A dense pointer array acting as the Page Directory. It subdivides the domain into a grid of **$(N/8)^3$** pointer blocks.
 2. **Level 0 (Leaf Blocks):** Bitmasked dense blocks containing **$8 \times 8 \times 8$** voxels. These hold the actual physical data fields ($P, \mathbf{v}, \mathbf{K}$) and utilize hardware bit-counting for efficient iteration over active cells.
 **1.3 Hardware-Managed Memory Locality (Implicit Morton)**
 The SNode compiler backend automatically enforces spatial locality when mapping the tree to physical RAM.
@@ -594,25 +616,25 @@ To reconcile the high frequency of particle motion with the high cost of memory 
 The system employs a specialized hybrid memory architecture designed to bridge the gap between high-resolution sparse physics and high-bandwidth dense numerical solving. This structure, termed the "Hybrid Pyramid," transitions from a spatially sparse backend at fine resolutions to a contiguous dense backend at coarse resolutions.
 
 **2.1 Hybrid Memory Backend**
-To optimize the Geometric Multigrid (GMG) solver on GPU architectures, the grid hierarchy spans seven discrete resolution levels ($L_0$ to $L_6$). The memory layout changes dynamically based on the resolution regime:
-*   **Sparse Backend ($L_0, L_1$):** At the finest resolutions (**$512^3$ and $256^3$**), the domain is sparsely virtualized using Bitmasked SNodes. This ensures that memory is allocated only for active physical regions, accommodating the fractal nature of biological tissue without allocating vacuum.
-*   **Dense Backend ($L_2 \dots L_6$):** As the grid coarsens (**$128^3$ down to $8^3$**), the sparsity benefit diminishes while the overhead of pointer chasing increases. Consequently, these levels are allocated as **Dense Padded Arrays** in linear memory. This layout maximizes cache coherency and memory bandwidth for the coarse-grid correction kernels.
+To optimize the Geometric Multigrid (GMG) solver on GPU architectures, the grid hierarchy spans $D+1$ discrete resolution levels ($L_0$ to $L_D$). The memory layout changes dynamically based on the resolution regime:
+*   **Sparse Backend ($L_0, L_1$):** At the finest resolutions (**$N^3$ and $(N/2)^3$**), the domain is sparsely virtualized using Bitmasked SNodes. This ensures that memory is allocated only for active physical regions, accommodating the fractal nature of biological tissue without allocating vacuum.
+*   **Dense Backend ($L_2 \dots L_D$):** As the grid coarsens (**$(N/4)^3$ down to $8^3$**), the sparsity benefit diminishes while the overhead of pointer chasing increases. Consequently, these levels are allocated as **Dense Padded Arrays** in linear memory. This layout maximizes cache coherency and memory bandwidth for the coarse-grid correction kernels.
 
 **2.2 Level Definitions & Allocation Strategy**
 The hierarchy is strictly inclusive; the allocation of a fine-grid block implies the existence of valid memory in the corresponding coarse-grid region.
 
-*   **Level 0 ($512^3$ - Primary Physics):** The ground-truth simulation layer. It uses a **Bitmasked SNode** backend to store the explicit physical state ($P, \mathbf{v}, \mathbf{K}$).
-*   **Level 1 ($256^3$ - Matrix-Free Correction):** An intermediate sparse layer used to aggregate residuals before bridging to the dense solver. It retains the **Bitmasked SNode** structure to handle complex boundary geometries efficiently.
-*   **Level 2 ($128^3$ - The Bridge):** The transition layer. This is the first **Dense** level, serving as the interface where sparse data is scattered into contiguous memory.
-*   **Levels 3, 4, 5 ($64^3, 32^3, 16^3$):** Standard coarse grids stored as flat, C-contiguous arrays. Used for rapid error smoothing.
-*   **Level 6 ($8^3$ - Base Solver):** The coarsest level. The entire domain fits within a single GPU thread block's Shared Memory, allowing for exact solving via Red-Black Gauss-Seidel without global memory latency.
+*   **Level 0 ($N^3$ - Primary Physics):** The ground-truth simulation layer. It uses a **Bitmasked SNode** backend to store the explicit physical state ($P, \mathbf{v}, \mathbf{K}$).
+*   **Level 1 ($(N/2)^3$ - Matrix-Free Correction):** An intermediate sparse layer used to aggregate residuals before bridging to the dense solver. It retains the **Bitmasked SNode** structure to handle complex boundary geometries efficiently.
+*   **Level 2 ($(N/4)^3$ - The Bridge):** The transition layer. This is the first **Dense** level, serving as the interface where sparse data is scattered into contiguous memory.
+*   **Levels $3 \dots D{-}1$:** Standard coarse grids stored as flat, C-contiguous arrays. Used for rapid error smoothing.
+*   **Level $D$ ($8^3$ - Base Solver):** The coarsest level. The entire domain fits within a single GPU thread block's Shared Memory, allowing for exact solving via Red-Black Gauss-Seidel without global memory latency.
 
-**2.3 Dense Padding Protocol ($L_2 \dots L_6$)**
+**2.3 Dense Padding Protocol ($L_2 \dots L_D$)**
 To execute high-throughput stencil operations (Laplacians, Restrictions) on the dense levels without branching logic (e.g., checking array bounds), all dense allocations utilize a **"Sealed Vacuum"** padding strategy.
-*   **Padding Dimensions:** A grid with nominal resolution $N^3$ is allocated physically as $(N+2)^3$.
+*   **Padding Dimensions:** A level with nominal resolution $N_\ell^3$ is allocated physically as $(N_\ell+2)^3$ (e.g., $L_2$ at $(N/4)^3$ is allocated as $(N/4+2)^3$).
 *   **Active vs. Ghost:**
-    *   **Active Domain:** Indices range from $1$ to $N$. These voxels contain valid solver data.
-    *   **Ghost/Vacuum:** Indices $0$ and $N+1$ on all axes represent the inactive void.
+    *   **Active Domain:** Indices range from $1$ to $N_\ell$. These voxels contain valid solver data.
+    *   **Ghost/Vacuum:** Indices $0$ and $N_\ell+1$ on all axes represent the inactive void.
 *   **Topological Isolation:** These ghost voxels are initialized to a safe identity state ($A_{ii}=1, b=0$). This allows kernels to blindly read neighbors; if a kernel reads a ghost voxel, the mathematical result naturally resolves to zero flux, enforcing a Homogeneous Neumann condition unconditionally.
 
 **2.4 Coordinate Mapping & Translation**
@@ -639,46 +661,69 @@ The system utilizes a specialized **Dual-Path Precision Architecture** to resolv
 
 The system utilizes a quantized storage strategy to reconcile memory bandwidth constraints with the high dynamic range of biological material properties.
 
-*   **Global Lookup Table (LUT):**
-    A global constant array stores 256 discrete permeability coefficients. These values are allocated in **Double Precision (`f64`)** to accurately represent the logarithmic physiological range $[10^{-11}, 10^{-2}] \text{m}^2$. The values loaded into this LUT are **dynamically scaled** by the host system based on the active Simulation Regime to maintain the Poroelastic Coupling Number:
-    *   **Regime I (Inertial):** $K_{LUT} = K_{phys}$.
-    *   **Regime II (Accelerated):** $K_{LUT} = K_{phys}$. Since the simulation utilizes Operator Splitting with macro-time steps ($\Delta t \approx 4.0s$), physical permeability values are required to correctly drive the full magnitude of the osmotic flux over the interval. Scaling is not applied to the material coefficients in this regime.
-    *   **Regime III (Seepage):** $K_{LUT} = K_{phys}$. With the solid phase locked, physical permeability is restored to maximize diffusion throughput.
+*   **Dual Global Lookup Table (LUT):**
+    Two global constant arrays store 256 discrete permeability coefficient pairs. Both arrays are allocated in **Double Precision (`f64`)** to accurately represent the logarithmic physiological range $[10^{-17}, 10^{-2}] \text{m}^2$:
+    *   **$K_{iso}$[256]:** The isotropic base permeability for each material class.
+    *   **$K_{fiber}$[256]:** The additional along-fiber permeability. For isotropic materials (gray matter, CSF, dural membranes, damaged tissue), $K_{fiber} = 0$. For white matter, $K_{fiber} > 0$ encodes the directional preference along fiber tracts.
+    Both LUT arrays store the unscaled physical permeability values ($K_{LUT} = K_{phys}$) across all simulation regimes. The permeability coefficients are regime-invariant; regime-dependent behavior is achieved through the time-stepping strategy (Regime I: explicit coupling, Regime II: operator splitting with macro-steps, Regime III: solid phase locked) rather than through scaling of material properties.
 
 *   **Voxel-Level Indexing:**
-    Individual active voxels store an 8-bit unsigned integer (`u8`) acting as a direct pointer into the global LUT.
+    Individual active voxels store an 8-bit unsigned integer (`u8`) acting as a direct pointer into both LUT arrays.
 
 *   **On-the-Fly Reconstruction:**
-    During the **Precise Path** (residual evaluation), the compute kernel retrieves the current regime-scaled permeability via a direct lookup using the stored `u8` index. The retrieved `f64` value is immediately cast into the **Transient Double-Single (`vec2f`)** format. This allows the flux integration logic to operate on the full-precision coefficient, bypassing single-precision registers entirely to preserve barrier integrity.
+    During the **Precise Path** (Path C residual evaluation), the compute kernel retrieves the physical permeability pair $(k_{iso}, k_{fiber})$ via a direct lookup using the stored `u8` index. The axis-projected permeability is then computed as $K_{axis} = k_{iso} + k_{fiber} \cdot \mathbf{M}_0[axis, axis]$, where $\mathbf{M}_0$ is the Structure Tensor read from the Tier 2 grid field. The retrieved `f64` values are immediately cast into the **Transient Double-Single (`vec2f`)** format. This allows the flux integration logic to operate on the full-precision coefficient, bypassing single-precision registers entirely to preserve barrier integrity.
+    During the **Lightweight Path** (Path A preconditioner), the kernel retrieves only $k_{iso}$, omitting the fiber contribution to preserve the zero-storage character of the path.
 
-### 3.2 The Dual-Path Precision Model
+*   **Material Class Definitions:**
+    Each `u8` index corresponds to one of the following material classes. IDs 0 and 255 are reserved control states; IDs 1–254 are active degrees of freedom ($\chi_{\Omega} = 1.0$). The complete FreeSurfer label remapping is defined in the preprocessing specification (`preprocessing_spec/material_map.md`).
 
-The solver architecture decouples the **Solver Search Direction** (Path A) from the **Residual Evaluation** (Path B). This separation allows the system to utilize high-throughput single-precision bandwidth for the iterative smoothing steps, while relying on transient emulated-double precision to govern global mass conservation and barrier enforcement.
+    | u8 ID | Class | $K_{fiber}$ | Role |
+    |------:|-------|:-----------:|------|
+    | 0 | Vacuum | — | Outside cranium. Zero flux (Neumann wall). |
+    | 1 | Cerebral White Matter | $> 0$ | Anisotropic. Fiber-directed flow via $\mathbf{M}_0$. Includes corpus callosum, fornix, optic chiasm. |
+    | 2 | Cortical Gray Matter | $0$ | Cerebral cortex. Isotropic. |
+    | 3 | Deep Gray Matter | $0$ | Basal ganglia, thalamus, hippocampus, amygdala, accumbens, substantia nigra, ventral DC. Isotropic. Primary hemorrhage sites. |
+    | 4 | Cerebellar White Matter | $> 0$ | Anisotropic. Arbor vitae; separate base permeability from cerebral WM. |
+    | 5 | Cerebellar Cortex | $0$ | Isotropic. Denser neuronal packing than cerebral cortex. |
+    | 6 | Brainstem | $> 0$ | Mixed nuclei and tracts. Anisotropic (corticospinal, medial lemniscus, peduncles). |
+    | 7 | Ventricular CSF | $0$ | Pure fluid ($\phi^f = 1$). Lateral, 3rd, 4th ventricles. Highest $K_{iso}$. |
+    | 8 | Subarachnoid CSF | $0$ | Pure fluid. Sulcal and cisternal spaces between pia and skull. |
+    | 9 | Choroid Plexus | $0$ | Permeable vascularized tissue within ventricles. Intermediate $K_{iso}$. |
+    | 10 | Dural Membrane | $0$ | Falx cerebri and tentorium cerebelli. Near-impermeable ($10^9$ contrast). |
+    | 11 | Vessel / Venous Sinus | $0$ | Large-caliber vascular structures. High $K_{iso}$. |
+    | 255 | Air Halo | — | Dynamic Dirichlet boundary ($P = P_{halo}$). |
 
-*   **Path A: The Approximate Guide (Cascaded Geometric Multigrid)**
-    *   **Role:** Generating the error correction vector $z \approx \mathbf{A}^{-1}r$ via the V-Cycle. This path prioritizes SIMD throughput and memory bandwidth over bit-exact precision.
-    *   **Storage:** The linear operators are pre-computed and stored in **Dense Padded Arrays** on levels $L_2 \dots L_6$.
+### 3.2 The Tri-Path Precision Summary
+
+The solver architecture utilizes three distinct paths (defined in V-Cycle Specification Sections 3.1–3.3). This section summarizes how they interact with the memory hierarchy defined above.
+
+*   **Path A (Lightweight Diagonal Preconditioner):**
+    *   **Role:** Default preconditioner for Regime I. Reconstructs the diagonal scaling factor on-the-fly from `u8` indices using only $k_{iso}$ from the Dual Global LUT.
+    *   **Storage:** Zero. Does not access the cached $L_2 \dots L_D$ operators.
+
+*   **Path B (Geometric Multigrid Preconditioner):**
+    *   **Role:** Default preconditioner for Regimes II/III. Generates the error correction vector $z \approx \mathbf{A}^{-1}r$ via the V-Cycle. Prioritizes SIMD throughput and memory bandwidth over bit-exact precision.
+    *   **Storage:** The linear operators are pre-computed and stored in **Dense Padded Arrays** on levels $L_2 \dots L_D$.
     *   **Cascaded Layout:**
-        *   **The Precision Firewall ($L_2$):** To handle the transition from the physics grid, this level utilizes a **Hybrid Virtual-Double** layout. Transmissibilities are stored in `f32`, while the matrix diagonal is stored in `vec2f` (Double-Single). To execute smoothing operations without global bandwidth penalties, the solver utilizes **Shared-Memory Staged Arithmetic**. The kernel loads the hybrid operator into a local L1 cache tile, performing the critical pivot subtraction ($D' = A_{ii} - T \cdot C_{prev}$) using mixed-precision intrinsics within the shared tile. This preserves the microscopic barrier residue ($10^{-9}$) against bulk fluid terms ($1.0$) while maximizing DRAM throughput.
-        *   **The Accelerator ($L_3 \dots L_6$):** The coarser levels store the operator in standard **Single Precision (`f32`)**. These levels utilize the **Epsilon Floor** topology, ensuring that all physical connections are represented by at least a minimum conductance ($\epsilon$) to maintain graph connectivity without extended precision storage.
+        *   **The Precision Firewall ($L_2$):** Utilizes a **Hybrid Virtual-Double** layout. Transmissibilities are stored in `f32`, while the matrix diagonal is stored in `vec2f` (Double-Single). The solver utilizes **Shared-Memory Staged Arithmetic**, loading the hybrid operator into a local L1 cache tile and performing the critical pivot subtraction ($D' = A_{ii} - T \cdot C_{prev}$) using mixed-precision intrinsics. This preserves the microscopic barrier residue ($10^{-9}$) against bulk fluid terms ($1.0$) while maximizing DRAM throughput.
+        *   **The Accelerator ($L_3 \dots L_D$):** Standard **Single Precision (`f32`)**. These levels utilize the **Epsilon Floor** topology, ensuring that all physical connections are represented by at least a minimum conductance ($\epsilon$) to maintain graph connectivity without extended precision storage.
 
-*   **Path B: The Precise Judge (Matrix-Free Transient Precision)**
-    *   **Role:** Calculating the exact physical error $r = b - \mathbf{A}x$ to determine convergence.
-    *   **Storage:** The operator is **Matrix-Free** and is never stored.
-    *   **Execution:** The kernel reconstructs the local stencil on-the-fly using the `u8` Material Indices. Crucially, the flux divergence accumulation is performed using **Transient Double-Single (`vec2f`)** arithmetic within the GPU registers.
-    *   **Rationale:** By utilizing a High-Word/Low-Word accumulator strategy, the kernel captures the rounding errors inherent in summing large opposing fluxes ($Q_{in} \approx Q_{out}$). This allows the solver to resolve minute net flux imbalances ($r \approx 10^{-15}$) across sealed boundaries, effectively preventing "Hydraulic Tunneling" while eventually storing the resulting defect vector in bandwidth-efficient `f32`.
+*   **Path C (Exact Residual):**
+    *   **Role:** Calculating the exact physical error $r = b - \mathbf{A}x$ to determine convergence, arbitrate between Path A and Path B, and generate the high-precision defect vector.
+    *   **Storage:** **Matrix-Free**. The operator is never stored; the stencil is reconstructed on-the-fly using `u8` indices and the full anisotropic permeability pair $(k_{iso}, k_{fiber})$.
+    *   **Execution:** The flux divergence accumulation is performed using **Transient Double-Single (`vec2f`)** arithmetic within the GPU registers. This resolves minute net flux imbalances ($r \approx 10^{-15}$) across sealed boundaries, preventing "Hydraulic Tunneling" while storing the resulting defect vector in bandwidth-efficient `f32`.
 
 ### 3.3 Hierarchical Field Organization
 
 Data fields are grouped into three distinct tiers, strictly aligned with the mixed-precision requirements of the physical operators. All fields within a leaf block are arranged in an AOSOA (Array-of-Structures-of-Arrays) layout to ensure coalesced memory access during stencil traversal.
 
 * **Tier 1: Low-Bit Geometry (`u8` / `f16`)**
-* **Permeability Index (`u8`):** The 8-bit pointer into the global `f64` Lookup Table.
+* **Permeability Index (`u8`):** The 8-bit pointer into the Dual Global `f64` Lookup Tables ($K_{iso}$, $K_{fiber}$).
 * **Porosity Factor (`f16`):** A geometric scalar $\phi_{geo} \in [\epsilon, 1.0]$ derived from the Skull SDF. This field encodes sub-voxel boundary information, allowing the solver to compute weighted "Cut-Cell" fluxes rather than binary staircase boundaries.
 
 * **Tier 2: Standard State (`f32`)**
 * **Pressure Solution ($P$):** The primary state variable ($x$) for the linear system. It is stored in `f32` to facilitate rapid IO and visualization.
-* **Coarse Linear Operator ($A_{ii}, T_{axis}$):** Explicit stencil coefficients stored only on Levels $L_2 \dots L_6$.
+* **Coarse Linear Operator ($A_{ii}, T_{axis}$):** Explicit stencil coefficients stored only on Levels $L_2 \dots L_D$.
 * **Structure Tensor ($\mathbf{M}_0$):** The local fiber orientation tensor ($\mathbf{a}_0 \otimes \mathbf{a}_0$), stored in single-precision to maintain stability when evaluating exponential anisotropic invariants.
 * **Osmotic Scalar ($C_{osm}$):** The local concentration of osmotically active solutes, rasterized from tracer particles.
 * **Coagulation Factor ($\alpha_{clot}$):** A normalized scalar $\in [0, 1]$ derived from the local average particle age.
@@ -746,7 +791,7 @@ Used for diffusion-dominated flow where tissue deformation has ceased and the sy
 $$ \max(\|\mathbf{F}_{total}\|) < \epsilon_{tol} $$
 * **Algorithm:**
 1. **Particle Lock:** The Solid Phase kernels (Step 2: P2G, Update, G2P) are suspended. Particles act as static permeability maps.
-2. **Fluid Diffusion (Re-Coupled):** The system solves the transient Darcy diffusion equation for fluid saturation using a Macro-Step $\Delta t_{macro} \approx 1.0s$. **Crucially, the Permeability LUT is reset to physical values ($K = K_{physical}$)**, removing the $1/\alpha$ scaling used in Regime II. This accelerates the drainage process towards equilibrium now that the solid deformation is frozen.
+2. **Fluid Diffusion (Re-Coupled):** The system solves the transient Darcy diffusion equation for fluid saturation using a Macro-Step $\Delta t_{macro} \approx 1.0s$. The Permeability LUT retains physical values ($K = K_{phys}$), and with the solid phase locked, the full diffusion throughput drives drainage towards equilibrium.
 3. **Passive Advection:** Tracer particles (blood contrast) are advected through the fixed domain using the Darcy velocity field $\mathbf{v} = -\frac{\mathbf{K}}{\mu} \nabla P$.
 * **Symplectic Re-entry (Wake-Up Protocol):**
 If an external interaction (e.g., surgical tool SDF or new hemorrhage source) is detected:
@@ -798,9 +843,9 @@ The solid phase is discretized into $N_p$ material points which function as quad
 * **Derived Age ($\tau$):** The elapsed lifespan ($\tau = t_{current} - t_0$), used to drive time-dependent rheological transitions such as coagulation (permeability decay) and syneresis (clot retraction).
 
 **2.2 Grid Basis Functions**
-The Eulerian domain is discretized by a uniform Cartesian grid with spacing $h$. Particle-Grid interactions are mediated by Quadratic B-Spline shape functions $N(\mathbf{x})$, which provide $C^1$ continuity.
+The Eulerian domain is discretized by a uniform Cartesian grid with spacing $\Delta x$. Particle-Grid interactions are mediated by Quadratic B-Spline shape functions $N(\mathbf{x})$, which provide $C^1$ continuity.
 For a grid node $i$ located at $\mathbf{x}_i$ and a particle at $\mathbf{x}_p$, the interpolation weight $w_{ip}$ is the tensor product of 1D basis functions:
-$$ w_{ip} = N\left( \frac{x_p - x_i}{h} \right) N\left( \frac{y_p - y_i}{h} \right) N\left( \frac{z_p - z_i}{h} \right) $$
+$$ w_{ip} = N\left( \frac{x_p - x_i}{\Delta x} \right) N\left( \frac{y_p - y_i}{\Delta x} \right) N\left( \frac{z_p - z_i}{\Delta x} \right) $$
 where the 1D basis function $N(u)$ is defined as:
 $$ N(u) = \begin{cases} \frac{3}{4} - |u|^2 & : 0 \leq |u| < \frac{1}{2} \\ \frac{1}{2}(\frac{3}{2} - |u|)^2 & : \frac{1}{2} \leq |u| < \frac{3}{2} \\ 0 & : |u| \ge \frac{3}{2} \end{cases} $$
 
@@ -918,6 +963,7 @@ The local hydraulic conductivity tensor $\mathbf{K}$ is governed by a dual-depen
 The baseline permeability is derived from the material phase and orientation:
 * **Intact Tissue ($D=0$):** Permeability is anisotropic, governed by the porous architecture. The tensor integrates contributions from fiber bundles ($\mathbf{M}_0$) to permit flow along valid anatomical tracts while maintaining high resistivity perpendicular to the fiber plane.
 $$ \mathbf{K}_{tissue} = k_{iso}\mathbf{I} + k_{fiber} \mathbf{M}_0 $$
+For the axis-aligned Cartesian stencil, the face-normal projection $\mathbf{n} \cdot \mathbf{K}_{tissue} \cdot \mathbf{n}$ reduces to reading a single diagonal element: $K_{axis} = k_{iso} + k_{fiber} \cdot \mathbf{M}_0[axis, axis]$. The scalars $k_{iso}$ and $k_{fiber}$ are stored per material class in the Dual Global LUT (Voxel System Spec, Section III.3.1: Quantized Indexing Protocol), while $\mathbf{M}_0$ is stored per voxel in the Tier 2 grid field.
 * **Liquefied Hematoma ($D=1$):** In damaged regions, the solid matrix is mechanically disrupted. The permeability approaches that of bulk fluid, modeled as a high-magnitude isotropic tensor.
 $$ \mathbf{K}_{blood} = k_{max}\mathbf{I} $$
 * **Geometric Transition:** The baseline tensor is computed via logarithmic interpolation to handle the scale difference between tissue and blood:
@@ -938,7 +984,7 @@ $$ \nabla \cdot \left( \frac{\mathbf{K}_{eff}}{\mu_f} \nabla P \right) = \underb
 * **Oncotic Term ($\Psi$):** A scalar source term derived from the local solute concentration $[Fe]$. This term acts as a negative divergence source (virtual sink), mathematically forcing the solver to generate pressure gradients that drive fluid influx into regions of high hematoma concentration, even against hydrostatic resistance.
 ---
 
-### VII. Solver Acceleration: Temporal Predictor Protocol
+### V. Solver Acceleration: Temporal Predictor Protocol
 
 The MG-PCG solver is mathematically robust enough to converge from an arbitrary initial state. However, to minimize the computational cost per frame, the system utilizes a **Temporal Predictor Protocol**. By initializing the solver close to the solution manifold, the initial residual norm $\|r\|_0$ is minimized, drastically reducing the number of V-Cycles required to reach convergence.
 
@@ -969,7 +1015,7 @@ $$ x_0^{(\mathbf{I})} = \frac{\sum_{p} w_{ip} m_p P_p^{(n)}}{\sum_{p} w_{ip} m_p
 **7.3 Cold-Start Dynamics & Robustness**
 In scenarios where temporal history is invalid or unavailable—specifically at simulation initialization ($t=0$) or immediately following a topological cut (surgical incision)—the Temporal Predictor is disabled.
 *   **The Identity Reset:** The initial guess is reset to zero ($x_0 = 0$).
-*   **MG Resilience:** Unlike standard PCG solvers, which may require thousands of iterations to resolve global pressure from a cold start, the MG-PCG architecture is naturally resilient to initialization errors. The first V-Cycle immediately propagates boundary information from the coarse levels ($L_6$) to the fine levels ($L_0$).
+*   **MG Resilience:** Unlike standard PCG solvers, which may require thousands of iterations to resolve global pressure from a cold start, the MG-PCG architecture is naturally resilient to initialization errors. The first V-Cycle immediately propagates boundary information from the coarse levels ($L_D$) to the fine levels ($L_0$).
 *   **Elimination of Warm-Up Kernels:** Consequently, the explicit "Hierarchical Warm-Start" pass used in previous architectures is obsolete. The V-Cycle Preconditioner itself acts as the warm-up mechanism, allowing the system to converge from a cold state in typically $< 10$ cycles without specialized initialization logic.
 
 **7.4 Numerical Efficiency Targets**
@@ -985,7 +1031,7 @@ The integration of Temporal Prediction with the MG-PCG architecture shifts the p
 
 ---
 
-### VIII. Signal Synthesis (Bloch-Torrey Physics)
+### VI. Signal Synthesis (Bloch-Torrey Physics)
 
 **8.1 Voxel Mixture**
 For a voxel $\mathbf{x}$, the local composition dictates the Nuclear Magnetic Resonance parameters.
@@ -1046,14 +1092,15 @@ Lagrangian Material Points (particles) are generated within the parenchymal mask
 * **Texture-Based Binding:** At instantiation ($t=0$), each particle samples the continuous Orientation Texture (generated in Phase 1.2) at its specific floating-point coordinate $\mathbf{x}_p$.
 * **Retrieval:** The particle retrieves the set of dominant fiber vectors $\{\mathbf{v}_1, \mathbf{v}_2, \mathbf{v}_3\}$ and their corresponding volume weights $\{w_1, w_2, w_3\}$.
 * **Tensor Initialization:** These components are immediately compressed into a local structural tensor $\mathbf{M}_0$. This tensor is stored as a persistent attribute on the particle, decoupling the simulation from the static texture lookups for all subsequent time steps.
+* **Grid Rasterization:** During each P2G transfer, the particle-level $\mathbf{M}_0$ tensors are rasterized to grid nodes using the same B-spline weights as mass and momentum. The resulting grid-level $\mathbf{M}_0$ field is stored in Tier 2 and used by the Darcy solver to compute axis-projected anisotropic permeability. For the initial frame (before the first P2G transfer), $\mathbf{M}_0$ is rasterized directly from the preprocessed fiber texture to grid nodes.
 * **Reference Volume Capture:** Immediately following instantiation, the system calculates the global target volume sum ($V_{target} = \sum_p V_p^0$). This scalar is stored in constant global memory and serves as the fixed set-point for the Monro-Kellie feedback loop.
 
 **2.2 Level 0 Virtual Mapping**
-Particle positions $\mathbf{x}_p$ are quantized into **$512^3$** grid coordinates.
+Particle positions $\mathbf{x}_p$ are quantized into **$N^3$** grid coordinates.
 *   **Morton Hashing:** Coordinates are interleaved into Z-order curve indices.
 *   **Block Activation:** These indices are masked to identify occupied **$8 \times 8 \times 8$** Micro-Blocks. Pointers to these blocks are allocated in the Level 0 hash table.
 
-**2.3 Pyramid Construction (Levels 1..N)**
+**2.3 Pyramid Construction (Levels $1 \dots D$)**
 To support the Geometric Multigrid solver, coarser grid levels are allocated recursively.
 *   **Topology Kernel:** A compute kernel scans the active blocks of Level $L$. For every active block, it calculates the parent block index in Level $L+1$.
 *   **Allocation:** If the parent block is unallocated, it is instantiated. This guarantees that the coarse solver grids strictly cover the domain of the fine physics grid.
@@ -1100,7 +1147,7 @@ The Sparse SNode tree is updated to reflect the new particle distribution.
 2. **Halo Injection:** A kernel queries the Global Skull SDF in the neighborhood of active fluid voxels. Neighboring voxels that return `Outside` (`SDF > 0`) are explicitly activated and assigned the Air material index (`255`).
 
 * **Action D: Coarse Operator Maintenance (RSGM Protocol)**
-The system determines the validity of the dense linear operators ($L_2 \dots L_6$) based on the simulation regime and spectral health.
+The system determines the validity of the dense linear operators ($L_2 \dots L_D$) based on the simulation regime and spectral health.
 * **Regime I:** The dense operator rebuild is skipped; the solver defaults to the Matrix-Free Diagonal path.
 * **Regime II:** The spectral convergence rate $\rho$ from the previous frame is evaluated. If $\rho \ge 0.6$ (indicating topological drift), the `is_topology_dirty` flag is raised to trigger the "Split-Stage Block-Local" reconstruction pipeline. Otherwise, the existing cached `f32` operators are retained.
 
@@ -1193,7 +1240,7 @@ The kernel employs **Indirect Dispatch**, launching exactly one GPU Thread Block
 * **Shared Memory Allocation (Precision-Gated):**
 Each thread block allocates a `ti.simt.block.shared_array` to function as a local scratchpad.
 * **Accumulator Precision:** The container is allocated strictly in **Single Precision (`f32`)**. The use of Transient Double-Single (`vec2f`) arithmetic is **prohibited** in this phase to prevent register spilling.
-* **Physical Layout:** To prevent serialization, the array is physically allocated with **X-axis padding** to create an odd-numbered stride (e.g., **$7 \times 6 \times 6$**).
+* **Physical Layout:** To prevent serialization, the array is physically allocated with **X-axis padding** to create an odd-numbered stride (e.g., a $6 \times 6 \times 6$ logical tile is padded to **$7 \times 6 \times 6$** physical stride).
 * **Mechanism:** The odd-numbered stride desynchronizes the memory bank mapping of vertical grid neighbors, ensuring that $3 \times 3 \times 3$ atomic stencils issued by a warp distribute writes across distinct memory banks.
 
 * **The Register-Scoped Fusion Pipeline:**
@@ -1208,7 +1255,7 @@ To further mitigate register pressure, the kernel execution utilizes **Variable 
 The grid velocity update logic is determined by the active regime.
 
 *   **Force Aggregation:**
-    All regimes first compute the net nodal force, combining the reconstructed hydraulic drag (from Phase 1) with internal elastic/gravity forces:
+    All regimes first compute the net nodal force, combining the reconstructed hydraulic drag (from Step 1) with internal elastic/gravity forces:
     $$ \mathbf{F}_{net} = \mathbf{F}_{elastic} + \mathbf{f}_{drag} + m_i \mathbf{g} $$
 
 *   **Regime I: Symplectic Time Integration**
@@ -1270,7 +1317,7 @@ The generated analytical signal volume is formatted for clinical ingest.
 The raw Bloch-Torrey scalar field $\mathcal{I}_{phy}$ is normalized to the 12-bit integer range $[0, 4095]$ consistent with standard Hounsfield-like MRI units.
 
 **5.2 Partial Volume Downsampling**
-To match the requested clinical slice thickness (e.g., 5mm), the isotropic simulation grid ($1mm^3$) is downsampled via weighted slab averaging. This physically simulates the "Slice Select" gradient of the MRI scanner.
+To match the requested clinical slice thickness (e.g., 5mm), the isotropic simulation grid ($\Delta x^3$ voxels) is downsampled via weighted slab averaging. This physically simulates the "Slice Select" gradient of the MRI scanner.
 
 **5.3 Metadata Injection**
 The volume is wrapped in a DICOM container. Simulation parameters (Pressure gradients, Strain invariants) are embedded in private DICOM tags for traceability.
