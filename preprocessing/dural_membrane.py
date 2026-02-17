@@ -45,6 +45,13 @@ CC_LABELS = frozenset({192, 251, 252, 253, 254, 255})
 
 _FS_LUT_SIZE = 2036  # matches material_map.LUT_SIZE
 
+# Maximum distance (mm) from the farther hemisphere for a falx voxel.
+# The interhemispheric fissure is 3-6mm wide, so hemisphere distance is
+# ~1.5-3mm in the fissure body and up to ~8-10mm at the widest points.
+# 15mm is conservative; voxels beyond this are in open posterior fossa
+# CSF where the watershed is a geometric coincidence, not a real membrane.
+_FALX_MAX_HEMI_DIST = 15.0
+
 
 def _build_fs_luts():
     """Build boolean LUTs for left/right cerebral and CC FreeSurfer labels."""
@@ -223,13 +230,18 @@ def reconstruct_falx(mat, left_mask, right_mask, cc_superior_z, dx_mm,
     del left_crop, right_crop
     print(f"  EDT pair: {time.monotonic() - t0:.1f}s")
 
-    # Watershed: equidistant surface within threshold
+    # Watershed: equidistant surface within threshold, with fissure-width guard
     diff = np.abs(dist_left - dist_right)
+    max_hemi_dist = np.maximum(dist_left, dist_right)
     del dist_left, dist_right
 
     mat_crop = mat[crop_slices]
-    falx_crop = (diff <= threshold_mult * dx_mm) & (mat_crop == 8)
-    del diff, mat_crop
+    falx_crop = (
+        (diff <= threshold_mult * dx_mm)
+        & (mat_crop == 8)
+        & (max_hemi_dist <= _FALX_MAX_HEMI_DIST)
+    )
+    del diff, mat_crop, max_hemi_dist
 
     # CC inferior boundary: exclude falx at or below corpus callosum
     # Adjust z-indices for the crop offset
@@ -495,7 +507,11 @@ def check_tentorial_notch(mat, dx_mm):
 
 
 def check_medial_wall_proximity(falx_mask, subject, dx_mm, affine):
-    """Check falx proximity to medial wall surfaces (optional).
+    """Check falx proximity to pial surfaces (optional).
+
+    Uses all pial vertices (not just the HCP medial wall ROI, which only
+    covers ~5k CC-adjacent vertices). The falx sits in the interhemispheric
+    fissure between the full medial pial surfaces of each hemisphere.
 
     Skips silently if surface files don't exist.
     """
@@ -504,34 +520,22 @@ def check_medial_wall_proximity(falx_mask, subject, dx_mm, affine):
         return
 
     native_dir = raw_dir(subject) / "Native"
-    mni_native_dir = raw_dir(subject).parent / "MNINonLinear" / "Native"
+
+    # Convert falx voxel indices to physical mm (once for both hemispheres)
+    falx_ijk = np.argwhere(falx_mask).astype(np.float64)
+    falx_mm = falx_ijk * dx_mm + affine[:3, 3]
 
     results = []
     for hemi, label in [("L", "left"), ("R", "right")]:
         surf_path = native_dir / f"{subject}.{hemi}.pial.native.surf.gii"
-        roi_path = mni_native_dir / f"{subject}.{hemi}.roi.native.shape.gii"
 
-        if not surf_path.exists() or not roi_path.exists():
+        if not surf_path.exists():
             return  # skip entirely if any file missing
 
         surf = nib.load(str(surf_path))
         coords = surf.darrays[0].data  # (n_vertices, 3)
 
-        roi = nib.load(str(roi_path))
-        roi_data = roi.darrays[0].data  # (n_vertices,)
-
-        # Medial wall vertices: roi == 0
-        medial_idx = np.where(roi_data == 0)[0]
-        if len(medial_idx) == 0:
-            continue
-
-        medial_coords = coords[medial_idx]
-        tree = cKDTree(medial_coords)
-
-        # Convert falx voxel indices to physical mm
-        falx_ijk = np.argwhere(falx_mask).astype(np.float64)
-        falx_mm = falx_ijk * dx_mm + affine[:3, 3]
-
+        tree = cKDTree(coords)
         dists, _ = tree.query(falx_mm)
         results.append((label, float(np.median(dists)), float(np.percentile(dists, 95))))
 
@@ -540,7 +544,7 @@ def check_medial_wall_proximity(falx_mask, subject, dx_mm, affine):
         print("Medial Wall Proximity")
         print("=" * 60)
         for label, median_d, p95_d in results:
-            print(f"  {label} medial wall: median={median_d:.1f} mm, "
+            print(f"  {label} pial surface: median={median_d:.1f} mm, "
                   f"95th={p95_d:.1f} mm")
 
 
