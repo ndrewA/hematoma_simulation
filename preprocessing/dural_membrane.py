@@ -80,6 +80,57 @@ def _compute_crop_bbox(mat, pad_vox):
     return tuple(slice(lo[i], hi[i]) for i in range(3))
 
 
+def _cap_runs(mask, diff, axis, max_thick=2):
+    """Cap contiguous runs along `axis` to max_thick voxels.
+
+    For runs exceeding max_thick, keeps the best contiguous window
+    (smallest sum of |diff|). Modifies mask in place.
+    Returns count of removed voxels.
+    """
+    removed = 0
+    # Move the target axis to the last position for easy column iteration
+    m = np.moveaxis(mask, axis, -1)
+    d = np.moveaxis(diff, axis, -1)
+    n = m.shape[-1]
+
+    # Iterate over all columns perpendicular to the target axis
+    for idx in np.ndindex(m.shape[:-1]):
+        col = m[idx]
+        if not col.any():
+            continue
+
+        # Find run starts and lengths
+        changes = np.diff(col.astype(np.int8))
+        starts = np.where(changes == 1)[0] + 1
+        ends = np.where(changes == -1)[0] + 1
+
+        # Handle run starting at index 0
+        if col[0]:
+            starts = np.concatenate(([0], starts))
+        # Handle run ending at last index
+        if col[n - 1]:
+            ends = np.concatenate((ends, [n]))
+
+        for s, e in zip(starts, ends):
+            run_len = e - s
+            if run_len <= max_thick:
+                continue
+
+            # Sliding window: find best window of size max_thick
+            vals = d[idx][s:e]
+            cumsum = np.cumsum(vals)
+            # window sums for windows of size max_thick
+            window_sums = cumsum[max_thick - 1:] - np.concatenate(([0.0], cumsum[:run_len - max_thick]))
+            best = int(np.argmin(window_sums))
+
+            # Zero out everything outside the best window
+            col[s:s + best] = False
+            col[s + best + max_thick:e] = False
+            removed += run_len - max_thick
+
+    return removed
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -241,7 +292,7 @@ def reconstruct_falx(mat, left_mask, right_mask, cc_superior_z, dx_mm,
         & (mat_crop == 8)
         & (max_hemi_dist <= _FALX_MAX_HEMI_DIST)
     )
-    del diff, mat_crop, max_hemi_dist
+    del mat_crop, max_hemi_dist
 
     # CC inferior boundary: exclude falx at or below corpus callosum
     # Adjust z-indices for the crop offset
@@ -255,6 +306,12 @@ def reconstruct_falx(mat, left_mask, right_mask, cc_superior_z, dx_mm,
             z_sup_crop = z_sup - z_offset
             if z_sup_crop >= 0:
                 falx_crop[:, y_local, :z_sup_crop + 1] = False
+
+    # Cap x-thickness to 2 voxels
+    removed = _cap_runs(falx_crop, diff, axis=0)
+    del diff
+    if removed > 0:
+        print(f"  x-thickness cap: removed {removed} voxels")
 
     # Write back to full grid
     falx_mask = np.zeros(mat.shape, dtype=bool)
@@ -303,7 +360,6 @@ def reconstruct_tentorium(mat, dx_mm, threshold_mult, notch_radius,
     del dist_cerebral, dist_cerebellar
 
     tent_crop = (diff <= threshold_mult * dx_mm) & (mat_crop == 8)
-    del diff
 
     # Brainstem notch exclusion — cropped dilation
     r_notch_vox = notch_radius / dx_mm
@@ -327,6 +383,12 @@ def reconstruct_tentorium(mat, dx_mm, threshold_mult, notch_radius,
         tent_crop[bs_slices] &= ~bs_dilated_sub
         del bs_sub, bs_dilated_sub
     del brainstem_crop
+
+    # Cap z-thickness to 2 voxels
+    removed = _cap_runs(tent_crop, diff, axis=2)
+    del diff
+    if removed > 0:
+        print(f"  z-thickness cap: removed {removed} voxels")
 
     # Write back to full grid
     tent_mask = np.zeros(mat.shape, dtype=bool)
@@ -564,21 +626,27 @@ def print_junction_thickness(falx_mask, tent_mask, dx_mm, mat):
     voxel_vol_ml = dx_mm ** 3 / 1000.0
     print(f"  Overlap: {n_overlap} voxels ({n_overlap * voxel_vol_ml:.2f} mL)")
 
-    # Max z-thickness at junction midline
+    # Max contiguous z-run at junction
     overlap_ijk = np.argwhere(overlap)
     if len(overlap_ijk) > 0:
-        # Group by (x, y) and measure z-span
+        # Group by (x, y) and measure max contiguous z-run
         xy_unique = np.unique(overlap_ijk[:, :2], axis=0)
-        max_z_span = 0
+        max_z_run = 0
         for xy in xy_unique:
-            z_vals = overlap_ijk[(overlap_ijk[:, 0] == xy[0]) &
-                                (overlap_ijk[:, 1] == xy[1]), 2]
-            z_span = int(z_vals.max()) - int(z_vals.min()) + 1
-            max_z_span = max(max_z_span, z_span)
+            z_vals = np.sort(overlap_ijk[(overlap_ijk[:, 0] == xy[0]) &
+                                         (overlap_ijk[:, 1] == xy[1]), 2])
+            # Find max contiguous run length
+            if len(z_vals) == 1:
+                run = 1
+            else:
+                gaps = np.diff(z_vals)
+                runs = np.split(z_vals, np.where(gaps > 1)[0] + 1)
+                run = max(len(r) for r in runs)
+            max_z_run = max(max_z_run, run)
 
-        print(f"  Max z-thickness: {max_z_span} voxels ({max_z_span * dx_mm:.1f} mm)")
-        if max_z_span > 3:
-            print(f"  WARNING: junction thickness > 3 voxels")
+        print(f"  Max z-run: {max_z_run} voxels ({max_z_run * dx_mm:.1f} mm)")
+        if max_z_run > 3:
+            print(f"  WARNING: junction z-run > 3 voxels")
 
     del overlap
 
