@@ -675,7 +675,7 @@ The system utilizes a quantized storage strategy to reconcile memory bandwidth c
     During the **Lightweight Path** (Path A preconditioner), the kernel retrieves only $k_{iso}$, omitting the fiber contribution to preserve the zero-storage character of the path.
 
 *   **Material Class Definitions:**
-    Each `u8` index corresponds to one of the following material classes. IDs 0 and 255 are reserved control states; IDs 1–254 are active degrees of freedom ($\chi_{\Omega} = 1.0$). The complete FreeSurfer label remapping is defined in the preprocessing specification (`preprocessing_spec/material_map.md`).
+    Each `u8` index corresponds to one of the following material classes. IDs 0 and 255 are reserved control states; IDs 1–254 are active degrees of freedom ($\chi_{\Omega} = 1.0$). The complete FreeSurfer label remapping is defined in the preprocessing specification (`spec/material_map.md`).
 
     | u8 ID | Class | $K_{fiber}$ | Role |
     |------:|-------|:-----------:|------|
