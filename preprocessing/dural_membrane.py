@@ -320,11 +320,46 @@ def reconstruct_falx(mat, fs, dx_mm, crop_slices):
     for lab in _DEEP_MIDLINE_FS:
         deep_lut[lab] = True
     deep_crop = deep_lut[fs_crop_safe]
-    del fs_crop, fs_crop_safe
     deep_buffer = binary_dilation(deep_crop, iterations=3)
     del deep_crop
     eligible &= ~deep_buffer
     del deep_buffer
+
+    # Septum pellucidum exclusion: where both CC and ventricular CSF
+    # exist in the same (x, y) column, exclude the z-range between
+    # them.  The septum pellucidum and fornix sit in this gap and are
+    # unlabeled (FS=0), so label-based exclusions can't catch them.
+    # Anteriorly the fissure legitimately dips below the CC genu, but
+    # the ventricles don't sit below the genu so the heuristic
+    # naturally doesn't fire there.
+    cc_crop_sp = cc_lut[fs_crop_safe]
+    vent_crop = (mat_crop == 7)
+    cc_any_z = cc_crop_sp.any(axis=2)    # (X_crop, Y_crop)
+    vent_any_z = vent_crop.any(axis=2)   # (X_crop, Y_crop)
+    both_col = cc_any_z & vent_any_z
+    if both_col.any():
+        Z_crop = mat_crop.shape[2]
+        z_idx = np.arange(Z_crop, dtype=np.int32)
+        # CC inferior z per column (Z_crop where no CC)
+        cc_inf_z = np.where(cc_crop_sp, z_idx[np.newaxis, np.newaxis, :], Z_crop).min(axis=2)
+        # Ventricle superior z per column (-1 where no vent)
+        vent_sup_z = np.where(vent_crop, z_idx[np.newaxis, np.newaxis, :], -1).max(axis=2)
+        # Build 3-D mask: voxels between vent_sup and cc_inf in affected columns
+        septum_mask = np.zeros(mat_crop.shape, dtype=bool)
+        cols = np.argwhere(both_col)
+        for xi, yi in cols:
+            z_lo = int(vent_sup_z[xi, yi])
+            z_hi = int(cc_inf_z[xi, yi])
+            if z_lo < z_hi:
+                septum_mask[xi, yi, z_lo:z_hi + 1] = True
+        n_septum = int(np.count_nonzero(eligible & septum_mask))
+        eligible &= ~septum_mask
+        print(f"  Septum pellucidum exclusion: {n_septum} eligible voxels removed "
+              f"({int(both_col.sum())} affected columns)")
+        del septum_mask, cc_inf_z, vent_sup_z
+    del cc_crop_sp, vent_crop, cc_any_z, vent_any_z, both_col
+
+    del fs_crop, fs_crop_safe
 
     # Cortex-proximity filter for CSF: only allow CSF near cortex
     cortex_crop = (mat_crop == 2)
@@ -410,14 +445,14 @@ def reconstruct_tentorium(mat, dx_mm, notch_radius, crop_slices):
     r_notch_vox = notch_radius / dx_mm
     brainstem_crop = (mat_crop == 6)
     if r_notch_vox >= 1.0 and brainstem_crop.any():
-        bs_xy = brainstem_crop.any(axis=2)
-        r_step = min(3, int(r_notch_vox))
-        r_step = max(r_step, 1)
-        n_iter = math.ceil(r_notch_vox / r_step)
-        selem_2d = build_ball(r_step)
-        mid = selem_2d.shape[2] // 2
-        selem_2d = selem_2d[:, :, mid]
-        bs_dilated = binary_dilation(bs_xy, selem_2d, iterations=n_iter)
+        # Use brainstem cross-section at the tentorial level rather than
+        # projecting across all z (which includes the wider pons below).
+        z_indices = np.where(brainstem_crop.any(axis=(0, 1)))[0]
+        z_min_bs, z_max_bs = int(z_indices.min()), int(z_indices.max())
+        tent_z_local = z_min_bs + 2 * (z_max_bs - z_min_bs) // 3
+        bs_xy = brainstem_crop[:, :, tent_z_local]
+        n_iter = max(1, round(r_notch_vox))
+        bs_dilated = binary_dilation(bs_xy, iterations=n_iter)
         eligible &= ~bs_dilated[:, :, np.newaxis]
         del bs_xy, bs_dilated
     del brainstem_crop

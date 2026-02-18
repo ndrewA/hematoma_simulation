@@ -680,6 +680,13 @@ def check_c7(ctx):
     boundary_cols = cerebral_proj & cerebellar_proj
     del cerebral_proj, cerebellar_proj
 
+    # Exclude tentorial notch: columns containing brainstem in the slab
+    # are part of the natural opening and don't need dural coverage.
+    notch_proj = (mat_slab == 6).any(axis=2)
+    notch_excl = binary_dilation(notch_proj, iterations=3)
+    boundary_cols &= ~notch_excl
+    del notch_proj, notch_excl
+
     dural_proj = (mat_slab == 10).any(axis=2)
     del mat_slab
 
