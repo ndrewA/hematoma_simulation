@@ -182,6 +182,11 @@ def parse_args(argv=None):
              "(header,domain,material,volume,compartment,dural,fiber). "
              "Implies --no-images unless overridden.",
     )
+    parser.add_argument(
+        "--only-figures", type=str, nargs="?", const="all", default=None,
+        help="Skip checks, only generate figures. Optional comma-separated "
+             "figure numbers (e.g. --only-figures 1,2). Default: all.",
+    )
     return parser.parse_args(argv)
 
 
@@ -417,6 +422,15 @@ def print_console_summary(all_results, census, metrics, subject, profile, N, dx)
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+def _parse_figure_set(only_figures):
+    """Parse --only-figures value into a set of ints, or None for all."""
+    if only_figures is None:
+        return None
+    if only_figures == "all":
+        return None
+    return {int(x.strip()) for x in only_figures.split(",")}
+
+
 def main(argv=None):
     """Orchestrate cross-cutting validation."""
     t_total = time.monotonic()
@@ -428,14 +442,21 @@ def main(argv=None):
     no_dural = args.no_dural
     verbose = args.verbose
 
+    figures_only = args.only_figures is not None
+    figure_set = _parse_figure_set(args.only_figures)
+
     selected = resolve_checks(args.only)
     no_images = args.no_images or (selected is not None)
 
     print(f"Subject: {subject}")
     print(f"Profile: {profile}  (N={N}, dx={dx} mm)")
+    if figures_only:
+        label = "all" if figure_set is None else ",".join(str(f) for f in sorted(figure_set))
+        print(f"Figures only: {label}")
     if selected is not None:
         print(f"Checks: {', '.join(sorted(selected))}")
-    print(f"Flags: no_images={no_images}, no_fiber={no_fiber}, no_dural={no_dural}")
+    if not figures_only:
+        print(f"Flags: no_images={no_images}, no_fiber={no_fiber}, no_dural={no_dural}")
     print()
 
     paths = _build_paths(subject, profile)
@@ -444,13 +465,20 @@ def main(argv=None):
         print(f"FATAL: material_map not found: {paths['mat']}")
         sys.exit(1)
 
+    paths["val_dir"].mkdir(parents=True, exist_ok=True)
+
+    ctx = CheckContext(paths, N, dx, subject, profile, verbose)
+
+    if figures_only:
+        from preprocessing.validation.figures import generate_all_figures
+        generate_all_figures(ctx, which=figure_set)
+        print(f"\n  Total wall time: {time.monotonic() - t_total:.1f}s")
+        return
+
     if not no_fiber and not paths["fiber"].exists():
         print(f"WARNING: fiber_M0 not found, skipping fiber checks")
         no_fiber = True
 
-    paths["val_dir"].mkdir(parents=True, exist_ok=True)
-
-    ctx = CheckContext(paths, N, dx, subject, profile, verbose)
     run_checks(ctx, selected, no_dural, no_fiber)
 
     # Abort early on critical header failures

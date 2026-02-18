@@ -30,8 +30,14 @@ _MAT_CMAP = ListedColormap(MATERIAL_COLORS)
 _MAT_NORM = BoundaryNorm(np.arange(-0.5, 12.5, 1.0), _MAT_CMAP.N)
 
 
-def generate_all_figures(ctx):
-    """Generate all diagnostic figures, resampling T1w once."""
+def generate_all_figures(ctx, which=None):
+    """Generate diagnostic figures, resampling T1w once.
+
+    Parameters
+    ----------
+    which : set of int or None
+        Figure numbers to generate (e.g. {1, 2}).  None means all.
+    """
     from scipy.ndimage import binary_dilation
 
     mat = ctx.mat
@@ -39,44 +45,50 @@ def generate_all_figures(ctx):
     paths = ctx.paths
 
     # Resample T1w to grid (shared across figs 1-3)
+    need_t1w = which is None or bool(which & {1, 2, 3})
     t1w = None
-    t1w_path = paths["t1w"]
-    if t1w_path.exists():
-        t1w = resample_to_grid(
-            str(t1w_path), ctx.mat_affine, (N, N, N),
-            order=1, cval=0.0, dtype=np.float32,
-        )
-    else:
-        print(f"  WARNING: T1w not found, figures will lack underlay")
+    if need_t1w:
+        t1w_path = paths["t1w"]
+        if t1w_path.exists():
+            t1w = resample_to_grid(
+                str(t1w_path), ctx.mat_affine, (N, N, N),
+                order=1, cval=0.0, dtype=np.float32,
+            )
+        else:
+            print(f"  WARNING: T1w not found, figures will lack underlay")
 
-    print("  Generating Figure 1...")
-    try:
-        generate_fig1(mat, t1w, N, ctx.subject, ctx.profile, ctx.dx, paths["fig1"])
-    except Exception as e:
-        print(f"  WARNING: Figure 1 failed: {e}")
-
-    print("  Generating Figure 2...")
-    try:
-        generate_fig2(mat, t1w, N, ctx.subject, ctx.profile, ctx.dx, paths["fig2"])
-    except Exception as e:
-        print(f"  WARNING: Figure 2 failed: {e}")
-
-    sdf = ctx.sdf
-    brain = ctx.brain
-    if sdf is not None and brain is not None:
-        print("  Generating Figure 3...")
+    if which is None or 1 in which:
+        print("  Generating Figure 1...")
         try:
-            generate_fig3(mat, sdf, t1w, brain, N, ctx.subject, ctx.profile,
-                          ctx.dx, paths["fig3"])
+            generate_fig1(mat, t1w, N, ctx.subject, ctx.profile, ctx.dx, paths["fig1"])
         except Exception as e:
-            print(f"  WARNING: Figure 3 failed: {e}")
+            print(f"  WARNING: Figure 1 failed: {e}")
 
-    if ctx.fiber_data is not None:
-        print("  Generating Figure 4...")
+    if which is None or 2 in which:
+        print("  Generating Figure 2...")
         try:
-            generate_fig4(ctx.fiber_data, ctx.subject, ctx.profile, paths["fig4"])
+            generate_fig2(mat, t1w, N, ctx.subject, ctx.profile, ctx.dx, paths["fig2"])
         except Exception as e:
-            print(f"  WARNING: Figure 4 failed: {e}")
+            print(f"  WARNING: Figure 2 failed: {e}")
+
+    if which is None or 3 in which:
+        sdf = ctx.sdf
+        brain = ctx.brain
+        if sdf is not None and brain is not None:
+            print("  Generating Figure 3...")
+            try:
+                generate_fig3(mat, sdf, t1w, brain, N, ctx.subject, ctx.profile,
+                              ctx.dx, paths["fig3"])
+            except Exception as e:
+                print(f"  WARNING: Figure 3 failed: {e}")
+
+    if which is None or 4 in which:
+        if ctx.fiber_data is not None:
+            print("  Generating Figure 4...")
+            try:
+                generate_fig4(ctx.fiber_data, ctx.subject, ctx.profile, paths["fig4"])
+            except Exception as e:
+                print(f"  WARNING: Figure 4 failed: {e}")
 
     del t1w
 

@@ -287,26 +287,44 @@ def reconstruct_falx(mat, fs, dx_mm, crop_slices):
         print(f"    Supratentorial boundary: {time.monotonic() - t0_st:.1f}s")
     del cerebral_crop, cerebellar_crop
 
-    # Eligible: non-vacuum, supratentorial, near cortical surfaces.
-    # The falx belongs in the interhemispheric fissure — CSF between
-    # cortical surfaces of the two hemispheres. Deep cisterns (around
-    # brainstem, thalami) are also midline CSF but aren't fissure.
-    #
-    # Strategy: only allow CSF within 10mm of cortical gray matter.
-    # This naturally selects the fissure (cortex on both sides) and
-    # excludes deep cisterns (far from cortex).
-    # Also exclude CC (2-vox buffer) and ventricles.
-    eligible = (mat_crop > 0) & supratentorial
+    # Eligible: only CSF and cortical GM, supratentorial.
+    # The falx sits in the interhemispheric fissure — CSF between
+    # cortical surfaces. Restricting to CSF + cortex prevents the
+    # sign-change surface from leaking through deep midline tissue
+    # (thalamus, brainstem, choroid plexus, septum pellucidum).
+    eligible = ((mat_crop == 2) | (mat_crop == 8)) & supratentorial
     del supratentorial
 
-    # CC exclusion
+    # CC exclusion — dilate only in x-y (not superiorly in z) so the
+    # falx can still reach down to the CC surface from above.
     _, _, cc_lut = _build_fs_luts()
-    cc_crop = cc_lut[np.clip(fs_crop, 0, _FS_LUT_SIZE - 1)]
-    del fs_crop
-    cc_buffer = binary_dilation(cc_crop, iterations=2)
+    fs_crop_safe = np.clip(fs_crop, 0, _FS_LUT_SIZE - 1)
+    cc_crop = cc_lut[fs_crop_safe]
+    struct_xy = np.ones((3, 3, 1), dtype=bool)
+    cc_buffer = binary_dilation(cc_crop, structure=struct_xy, iterations=2)
     del cc_crop
-    eligible &= ~cc_buffer & (mat_crop != 7)
+    eligible &= ~cc_buffer
     del cc_buffer
+
+    # Deep midline exclusion: dilate ventricles, thalamus, choroid,
+    # and brainstem to cover adjacent unlabeled cistern CSF (FS=0)
+    # that would otherwise let the falx leak into deep structures.
+    _DEEP_MIDLINE_FS = frozenset({
+        4, 5, 43, 44,   # lateral ventricles
+        14, 15,          # 3rd and 4th ventricles
+        10, 49,          # thalamus
+        31, 63,          # choroid plexus
+        16,              # brainstem
+    })
+    deep_lut = np.zeros(_FS_LUT_SIZE, dtype=bool)
+    for lab in _DEEP_MIDLINE_FS:
+        deep_lut[lab] = True
+    deep_crop = deep_lut[fs_crop_safe]
+    del fs_crop, fs_crop_safe
+    deep_buffer = binary_dilation(deep_crop, iterations=3)
+    del deep_crop
+    eligible &= ~deep_buffer
+    del deep_buffer
 
     # Cortex-proximity filter for CSF: only allow CSF near cortex
     cortex_crop = (mat_crop == 2)
@@ -329,6 +347,17 @@ def reconstruct_falx(mat, fs, dx_mm, crop_slices):
     n_tissue = int(falx_crop.sum()) - n_csf
     print(f"  Falx sign-change: {int(falx_crop.sum())} voxels "
           f"({n_csf} CSF, {n_tissue} tissue)")
+
+    # Keep only the largest connected component (discard tiny fragments)
+    labeled, n_comp = cc_label(falx_crop)
+    if n_comp > 1:
+        counts = np.bincount(labeled.ravel())[1:]
+        largest = int(counts.argmax()) + 1
+        n_removed = int(falx_crop.sum()) - int(counts.max())
+        falx_crop = (labeled == largest)
+        print(f"  Kept largest component ({int(counts.max())} voxels), "
+              f"removed {n_comp - 1} fragments ({n_removed} voxels)")
+    del labeled
     del mat_crop
 
     # Write back to full grid
