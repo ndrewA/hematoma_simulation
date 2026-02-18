@@ -434,16 +434,30 @@ def merge_dural(mat, falx_mask, tent_mask):
 # ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------
-def check_idempotency(mat):
-    """Check for and reset pre-existing dural voxels (u8=10).
+def check_idempotency(mat, fs):
+    """Reset pre-existing dural voxels (u8=10) to their original material class.
 
-    Called BEFORE any mask computation to ensure clean state.
+    Called BEFORE any mask computation to ensure clean state.  Uses FS labels
+    to restore the correct material class instead of blindly setting u8=8,
+    which would corrupt tissue voxels (brainstem, cerebellar cortex, etc.)
+    that were overwritten by a previous dural membrane run.
+
     Returns count of reset voxels.
     """
     existing = int(np.count_nonzero(mat == 10))
     if existing > 0:
-        print(f"WARNING: {existing} pre-existing u8=10 voxels — resetting to u8=8")
-        mat[mat == 10] = 8
+        from preprocessing.material_map import build_lut, apply_mapping
+        lut, _ = build_lut()
+        dural_mask = (mat == 10)
+        restored = apply_mapping(fs[dural_mask], lut)
+        mat[dural_mask] = restored
+        # Voxels whose FS label maps to vacuum (u8=0) were originally sulcal
+        # CSF (filled by subarachnoid_csf step) — restore them as CSF.
+        mat[dural_mask & (mat == 0)] = 8
+        n_tissue = int(np.count_nonzero(restored > 0))
+        n_csf = existing - n_tissue
+        print(f"Reset {existing} pre-existing u8=10 voxels "
+              f"({n_tissue} to tissue, {n_csf} to CSF)")
     return existing
 
 
@@ -683,8 +697,8 @@ def main(argv=None):
     print(f"Shape: {mat.shape}  dtype: {mat.dtype}")
     print()
 
-    # Idempotency: reset any pre-existing dural voxels
-    check_idempotency(mat)
+    # Idempotency: reset any pre-existing dural voxels using FS labels
+    check_idempotency(mat, fs)
 
     # Compute crop bounding box for EDT (used by both falx and tentorium)
     pad_vox = math.ceil(args.notch_radius / dx_mm) + 2
