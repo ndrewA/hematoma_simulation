@@ -211,44 +211,47 @@ def save_fiber_m0(out_dir, M0, diff_affine):
 # ---------------------------------------------------------------------------
 # Validation printers
 # ---------------------------------------------------------------------------
-def print_trace_stats(M0, is_aniso):
-    """Trace stats in WM voxels."""
+def print_trace_stats(M0, is_aniso, brain_mask):
+    """Trace stats in brain and WM voxels."""
     print("\n" + "=" * 60)
-    print("Trace Statistics (WM voxels)")
+    print("Trace Statistics")
     print("=" * 60)
     trace = M0[..., 0] + M0[..., 1] + M0[..., 2]
-    wm_trace = trace[is_aniso]
-    nonzero = wm_trace[wm_trace > 0]
-    if len(nonzero) == 0:
-        print("  WARNING: no non-zero trace values in WM")
-        return
-    print(f"  WM voxels:     {int(np.count_nonzero(is_aniso))}")
-    print(f"  Non-zero trace: {len(nonzero)}")
-    print(f"  Mean:  {float(np.mean(nonzero)):.4f}")
-    print(f"  Std:   {float(np.std(nonzero)):.4f}")
-    print(f"  Min:   {float(np.min(nonzero)):.4f}")
-    print(f"  Max:   {float(np.max(nonzero)):.4f}")
-    print(f"  Median: {float(np.median(nonzero)):.4f}")
+
+    for label, mask in [("Brain", brain_mask), ("WM", is_aniso)]:
+        region_trace = trace[mask]
+        nonzero = region_trace[region_trace > 0]
+        if len(nonzero) == 0:
+            print(f"  {label}: WARNING — no non-zero trace values")
+            continue
+        print(f"  {label} voxels: {int(np.count_nonzero(mask))}, "
+              f"non-zero trace: {len(nonzero)}")
+        print(f"    Mean: {float(np.mean(nonzero)):.4f}  "
+              f"Median: {float(np.median(nonzero)):.4f}  "
+              f"Std: {float(np.std(nonzero)):.4f}")
+        print(f"    Min:  {float(np.min(nonzero)):.4f}  "
+              f"Max: {float(np.max(nonzero)):.4f}")
 
 
-def print_psd_check(M0, is_aniso, n_samples=10000):
-    """Check positive semi-definiteness of M0 at random WM voxels."""
+def print_psd_check(M0, brain_mask, n_samples=10000):
+    """Check positive semi-definiteness of M0 at random brain voxels."""
     print("\n" + "=" * 60)
-    print("PSD Check (random WM voxels)")
+    print("PSD Check (random brain voxels)")
     print("=" * 60)
 
-    wm_indices = np.argwhere(is_aniso)
-    if len(wm_indices) == 0:
-        print("  No WM voxels to check")
+    trace = M0[..., 0] + M0[..., 1] + M0[..., 2]
+    nz_indices = np.argwhere(brain_mask & (trace > 0))
+    if len(nz_indices) == 0:
+        print("  No non-zero brain voxels to check")
         return
 
     rng = np.random.default_rng(42)
-    n = min(n_samples, len(wm_indices))
-    sample_idx = rng.choice(len(wm_indices), size=n, replace=False)
+    n = min(n_samples, len(nz_indices))
+    sample_idx = rng.choice(len(nz_indices), size=n, replace=False)
 
     n_fail = 0
     for idx in sample_idx:
-        i, j, k = wm_indices[idx]
+        i, j, k = nz_indices[idx]
         m = M0[i, j, k]
         # Reconstruct symmetric 3x3 matrix
         mat = np.array([
@@ -264,14 +267,22 @@ def print_psd_check(M0, is_aniso, n_samples=10000):
     print(f"  Failures: {n_fail}")
 
 
-def print_zero_check(M0, is_aniso):
-    """Verify M0 is zero outside WM."""
+def print_brain_coverage(M0, brain_mask, is_aniso):
+    """Report M0 coverage in brain and WM regions."""
     print("\n" + "=" * 60)
-    print("Zero Outside WM Check")
+    print("M0 Coverage")
     print("=" * 60)
-    outside = ~is_aniso
-    nonzero_outside = int(np.count_nonzero(np.any(M0[outside] != 0, axis=-1)))
-    print(f"  Non-zero voxels outside WM: {nonzero_outside}")
+    has_m0 = np.any(M0 != 0, axis=-1)
+    n_brain = int(np.count_nonzero(brain_mask))
+    n_brain_m0 = int(np.count_nonzero(has_m0 & brain_mask))
+    n_wm = int(np.count_nonzero(is_aniso))
+    n_wm_m0 = int(np.count_nonzero(has_m0 & is_aniso))
+    n_nonwm_m0 = int(np.count_nonzero(has_m0 & brain_mask & ~is_aniso))
+    print(f"  Brain voxels with M0: {n_brain_m0}/{n_brain} "
+          f"({100*n_brain_m0/n_brain:.1f}%)")
+    print(f"    WM:     {n_wm_m0}/{n_wm} ({100*n_wm_m0/n_wm:.1f}%)")
+    print(f"    Non-WM: {n_nonwm_m0}/{n_brain - n_wm} "
+          f"({100*n_nonwm_m0/(n_brain - n_wm):.1f}%)")
 
 
 def print_coverage(fracs, brain_mask):
@@ -323,10 +334,10 @@ def print_principal_directions(M0, diff_labels):
     print(f"  Dominant axis: {axis_names[dominant]}")
 
 
-def print_smoothness(M0, is_aniso):
-    """Mean gradient magnitude of trace in WM — expect < 0.5."""
+def print_smoothness(M0, brain_mask):
+    """Mean gradient magnitude of trace in brain — expect < 0.5."""
     print("\n" + "=" * 60)
-    print("Smoothness Check")
+    print("Smoothness Check (brain voxels)")
     print("=" * 60)
 
     trace = M0[..., 0] + M0[..., 1] + M0[..., 2]
@@ -349,18 +360,16 @@ def print_smoothness(M0, is_aniso):
     )
     del gx, gy, gz
 
-    # Mask to WM (trim is_aniso to match)
-    wm_trimmed = is_aniso[:s[0], :s[1], :s[2]]
-    wm_grad = grad_mag[wm_trimmed]
+    brain_trimmed = brain_mask[:s[0], :s[1], :s[2]]
+    brain_grad = grad_mag[brain_trimmed]
     del grad_mag
 
-    if len(wm_grad) == 0:
-        print("  No WM voxels for smoothness check")
+    if len(brain_grad) == 0:
+        print("  No brain voxels for smoothness check")
         return
 
-    mean_grad = float(np.mean(wm_grad))
-    print(f"  Mean gradient: {mean_grad:.4f}")
-    print(f"  Max gradient:  {float(np.max(wm_grad)):.4f}")
+    print(f"  Mean gradient: {float(np.mean(brain_grad)):.4f}")
+    print(f"  Max gradient:  {float(np.max(brain_grad)):.4f}")
 
 
 # ---------------------------------------------------------------------------
@@ -403,7 +412,11 @@ def main(argv=None):
     print()
 
     # 4. WM mask via FS labels
-    print("--- Building WM mask ---")
+    # NOTE: WM masking disabled — M_0 is stored for all brain voxels.
+    # The solver's K_fiber LUT (= 0 for non-WM classes) is the real gate.
+    # Keeping M_0 everywhere gives smoother P2G blending at WM/GM boundaries
+    # and preserves optionality if GM classes later get K_fiber > 0.
+    print("--- Loading FS labels (for validation only) ---")
     fs_data, fs_affine = load_fs_labels(t1w_dir)
     aniso_lut = _build_aniso_lut()
     is_aniso, diff_labels = build_wm_mask(
@@ -411,9 +424,9 @@ def main(argv=None):
     )
     del fs_data, fs_affine
     n_aniso = int(np.count_nonzero(is_aniso))
-    print(f"  Anisotropic voxels: {n_aniso}")
+    print(f"  Anisotropic (WM) voxels: {n_aniso}")
 
-    apply_wm_mask(M0, is_aniso)
+    # apply_wm_mask(M0, is_aniso)
     print()
 
     # 5. Save
@@ -421,11 +434,11 @@ def main(argv=None):
     save_fiber_m0(out_dir, M0, diff_affine)
 
     # 6. Validation
-    print_trace_stats(M0, is_aniso)
-    print_psd_check(M0, is_aniso)
-    print_zero_check(M0, is_aniso)
+    print_trace_stats(M0, is_aniso, brain_mask)
+    print_psd_check(M0, brain_mask)
+    print_brain_coverage(M0, brain_mask, is_aniso)
     print_principal_directions(M0, diff_labels)
-    print_smoothness(M0, is_aniso)
+    print_smoothness(M0, brain_mask)
 
     print("\n" + "=" * 60)
     print("Done.")

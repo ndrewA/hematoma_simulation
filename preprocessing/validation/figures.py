@@ -284,7 +284,7 @@ def generate_fig3(mat, sdf, t1w, brain, N, subject, profile, dx, path):
     mid = N // 2
 
     contour_levels = [-20, -10, -5, 0, 5, 10]
-    contour_colors = ["#0000FF", "#4444FF", "#8888FF", "#000000", "#FF8888", "#FF0000"]
+    contour_colors = ["#0000FF", "#4444FF", "#8888FF", "#00FF00", "#FF8888", "#FF0000"]
     contour_lw = [0.5, 0.5, 0.5, 2.0, 0.5, 0.5]
 
     sdf_slices = [sdf[mid, :, :], sdf[:, mid, :], sdf[:, :, mid]]
@@ -327,16 +327,36 @@ def generate_fig3(mat, sdf, t1w, brain, N, subject, profile, dx, path):
     ax.axis("off")
 
     ax = axes[1, 2]
-    pad = min(40, N // 4)
-    x_lo = max(0, mid - pad)
-    x_hi = min(N, mid + pad)
-    z_lo = max(0, mid - pad)
-    z_hi = min(N, mid + pad)
+    # Zoom into the left Sylvian fissure region: find the skull surface
+    # (SDF≈0) on the left lateral side and center the window on it.
+    sdf_coronal = sdf[:, mid, :]
+    half = min(40, N // 4)
+    # Find the actual skull surface (SDF closest to 0) on the left side
+    brain_coronal = brain[:, mid, :]
+    if brain_coronal.any():
+        brain_zs = np.where(brain_coronal.any(axis=0))[0]
+        z_center = int((brain_zs[0] + brain_zs[-1]) // 2)
+        # Find x where SDF≈0 at z_center on the left half
+        sdf_row = sdf_coronal[:mid, z_center]
+        x_skull = int(np.argmin(np.abs(sdf_row)))
+        x_lo = max(0, x_skull - half)
+        x_hi = min(N, x_skull + half)
+        z_lo = max(0, z_center - half)
+        z_hi = min(N, z_center + half)
+    else:
+        x_lo, x_hi = max(0, mid - half), min(N, mid + half)
+        z_lo, z_hi = max(0, mid - half), min(N, mid + half)
     sdf_zoom = sdf[x_lo:x_hi, mid, z_lo:z_hi]
-    ax.imshow(sdf_zoom.T, origin="lower", cmap="RdBu_r",
-              vmin=-30, vmax=30, interpolation="nearest")
-    ax.contour(sdf_zoom.T, levels=[0], colors=["black"], linewidths=[2.0])
-    ax.set_title("Sylvian zoom (coronal)", fontsize=9)
+    # T1w underlay with SDF contour lines for anatomical context
+    if t1w is not None:
+        ax.imshow(t1w[x_lo:x_hi, mid, z_lo:z_hi].T, origin="lower",
+                  cmap="gray", interpolation="nearest")
+    else:
+        ax.imshow(sdf_zoom.T, origin="lower", cmap="RdBu_r",
+                  vmin=-15, vmax=15, interpolation="nearest")
+    ax.contour(sdf_zoom.T, levels=contour_levels, colors=contour_colors,
+               linewidths=[lw * 1.5 for lw in contour_lw])
+    ax.set_title("Sylvian zoom — left lateral (coronal)", fontsize=9)
     ax.axis("off")
 
     plt.tight_layout(rect=[0, 0, 1, 0.95])
@@ -443,7 +463,7 @@ def _compute_dec_slice(tensor_slice):
         principal = eigvecs[:, :, -1]
         abs_principal = np.abs(principal)
 
-        brightness = trace[i, nz_cols] / trace_max
+        brightness = (trace[i, nz_cols] / trace_max) ** 0.4
         rgb[i, nz_cols] = abs_principal * brightness[:, np.newaxis]
 
     return np.clip(rgb, 0, 1)
