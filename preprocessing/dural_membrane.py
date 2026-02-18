@@ -22,7 +22,7 @@ from scipy.ndimage import (
     binary_erosion,
     label as cc_label,
 )
-from scipy.spatial import cKDTree
+from scipy.spatial import ConvexHull, cKDTree
 
 from preprocessing.utils import PROFILES, build_ball, processed_dir, raw_dir
 from preprocessing.material_map import CLASS_NAMES, print_census
@@ -325,39 +325,51 @@ def reconstruct_falx(mat, fs, dx_mm, crop_slices):
     eligible &= ~deep_buffer
     del deep_buffer
 
-    # Septum pellucidum exclusion: where both CC and ventricular CSF
-    # exist in the same (x, y) column, exclude the z-range between
-    # them.  The septum pellucidum and fornix sit in this gap and are
-    # unlabeled (FS=0), so label-based exclusions can't catch them.
-    # Anteriorly the fissure legitimately dips below the CC genu, but
-    # the ventricles don't sit below the genu so the heuristic
-    # naturally doesn't fire there.
-    cc_crop_sp = cc_lut[fs_crop_safe]
-    vent_crop = (mat_crop == 7)
-    cc_any_z = cc_crop_sp.any(axis=2)    # (X_crop, Y_crop)
-    vent_any_z = vent_crop.any(axis=2)   # (X_crop, Y_crop)
-    both_col = cc_any_z & vent_any_z
-    if both_col.any():
-        Z_crop = mat_crop.shape[2]
-        z_idx = np.arange(Z_crop, dtype=np.int32)
-        # CC inferior z per column (Z_crop where no CC)
-        cc_inf_z = np.where(cc_crop_sp, z_idx[np.newaxis, np.newaxis, :], Z_crop).min(axis=2)
-        # Ventricle superior z per column (-1 where no vent)
-        vent_sup_z = np.where(vent_crop, z_idx[np.newaxis, np.newaxis, :], -1).max(axis=2)
-        # Build 3-D mask: voxels between vent_sup and cc_inf in affected columns
-        septum_mask = np.zeros(mat_crop.shape, dtype=bool)
-        cols = np.argwhere(both_col)
-        for xi, yi in cols:
-            z_lo = int(vent_sup_z[xi, yi])
-            z_hi = int(cc_inf_z[xi, yi])
-            if z_lo < z_hi:
-                septum_mask[xi, yi, z_lo:z_hi + 1] = True
-        n_septum = int(np.count_nonzero(eligible & septum_mask))
-        eligible &= ~septum_mask
-        print(f"  Septum pellucidum exclusion: {n_septum} eligible voxels removed "
-              f"({int(both_col.sum())} affected columns)")
-        del septum_mask, cc_inf_z, vent_sup_z
-    del cc_crop_sp, vent_crop, cc_any_z, vent_any_z, both_col
+    # Deep midline envelope exclusion: the falx lives in the
+    # interhemispheric fissure which wraps AROUND the CC from above.
+    # Everything INSIDE the envelope between the CC and the subcortical
+    # structures (ventricles, deep GM, brainstem, cerebellum) is deep
+    # midline — septum pellucidum, fornix, velum interpositum, internal
+    # cerebral veins — where the falx must never go.
+    #
+    # For each sagittal slice, compute the 2-D convex hull of the CC
+    # and deep-structure voxels in the (y, z) plane and exclude the
+    # interior.  This traces diagonal boundaries that follow the
+    # natural geometry between the two masses and catches FS=0 gaps
+    # that label-based dilation cannot reach.
+    cc_hull = cc_lut[fs_crop_safe]
+    deep_hull_lut = np.zeros(256, dtype=bool)
+    deep_hull_lut[[3, 4, 5, 6, 7]] = True  # deep GM, cerebellar WM/ctx, brainstem, vent CSF
+    deep_hull = deep_hull_lut[mat_crop]
+
+    X_crop, Y_crop, Z_crop = mat_crop.shape
+    hull_mask = np.zeros(mat_crop.shape, dtype=bool)
+    yy, zz = np.meshgrid(np.arange(Y_crop), np.arange(Z_crop), indexing="ij")
+    grid_yz = np.column_stack([yy.ravel(), zz.ravel()])
+    n_hull_slices = 0
+
+    for xi in range(X_crop):
+        if not cc_hull[xi].any() or not deep_hull[xi].any():
+            continue
+        combined_yz = np.argwhere(cc_hull[xi] | deep_hull[xi])
+        if len(combined_yz) < 3:
+            continue
+        try:
+            hull = ConvexHull(combined_yz)
+        except Exception:
+            continue
+        # Rasterise hull interior via half-plane intersection
+        inside = np.ones(len(grid_yz), dtype=bool)
+        for simplex in hull.equations:
+            inside &= (grid_yz @ simplex[:2] + simplex[2]) <= 0
+        hull_mask[xi] = inside.reshape(Y_crop, Z_crop)
+        n_hull_slices += 1
+
+    n_hull_excl = int(np.count_nonzero(eligible & hull_mask))
+    eligible &= ~hull_mask
+    print(f"  Deep midline envelope (convex hull): {n_hull_excl} eligible voxels "
+          f"removed ({n_hull_slices} sagittal slices)")
+    del cc_hull, deep_hull, hull_mask, grid_yz
 
     del fs_crop, fs_crop_safe
 
