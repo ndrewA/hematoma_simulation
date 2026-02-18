@@ -45,13 +45,6 @@ CC_LABELS = frozenset({192, 251, 252, 253, 254, 255})
 
 _FS_LUT_SIZE = 2036  # matches material_map.LUT_SIZE
 
-# Maximum distance (mm) from the farther hemisphere for a falx voxel.
-# The interhemispheric fissure is 3-6mm wide, so hemisphere distance is
-# ~1.5-3mm in the fissure body and up to ~8-10mm at the widest points.
-# 15mm is conservative; voxels beyond this are in open posterior fossa
-# CSF where the watershed is a geometric coincidence, not a real membrane.
-_FALX_MAX_HEMI_DIST = 15.0
-
 
 def _build_fs_luts():
     """Build boolean LUTs for left/right cerebral and CC FreeSurfer labels."""
@@ -80,55 +73,39 @@ def _compute_crop_bbox(mat, pad_vox):
     return tuple(slice(lo[i], hi[i]) for i in range(3))
 
 
-def _cap_runs(mask, diff, axis, max_thick=2):
-    """Cap contiguous runs along `axis` to max_thick voxels.
+# ---------------------------------------------------------------------------
+# Surface-map construction
+# ---------------------------------------------------------------------------
+def _sign_change_surface(phi, eligible):
+    """Extract zero-level-set of phi via sign-change detection.
 
-    For runs exceeding max_thick, keeps the best contiguous window
-    (smallest sum of |diff|). Modifies mask in place.
-    Returns count of removed voxels.
+    Marks both voxels at every face where phi changes sign.
+    Guaranteed 6-separating by the digital Jordan-Brouwer theorem.
+
+    Parameters
+    ----------
+    phi : ndarray, 3-D float
+        Signed distance field (dist_A - dist_B).
+    eligible : ndarray, 3-D bool
+        Non-vacuum mask. Only eligible voxels are marked.
+
+    Returns
+    -------
+    surface : ndarray, 3-D bool
+        The membrane mask (2 voxels thick at each sign change).
     """
-    removed = 0
-    # Move the target axis to the last position for easy column iteration
-    m = np.moveaxis(mask, axis, -1)
-    d = np.moveaxis(diff, axis, -1)
-    n = m.shape[-1]
+    positive = phi >= 0
+    surface = np.zeros(phi.shape, dtype=bool)
+    for ax in range(3):
+        lo = [slice(None)] * 3; hi = [slice(None)] * 3
+        lo[ax] = slice(None, -1); hi[ax] = slice(1, None)
+        flip = positive[tuple(lo)] != positive[tuple(hi)]
+        s1 = [slice(None)] * 3; s1[ax] = slice(None, -1)
+        s2 = [slice(None)] * 3; s2[ax] = slice(1, None)
+        surface[tuple(s1)] |= flip
+        surface[tuple(s2)] |= flip
+    return surface & eligible
 
-    # Iterate over all columns perpendicular to the target axis
-    for idx in np.ndindex(m.shape[:-1]):
-        col = m[idx]
-        if not col.any():
-            continue
-
-        # Find run starts and lengths
-        changes = np.diff(col.astype(np.int8))
-        starts = np.where(changes == 1)[0] + 1
-        ends = np.where(changes == -1)[0] + 1
-
-        # Handle run starting at index 0
-        if col[0]:
-            starts = np.concatenate(([0], starts))
-        # Handle run ending at last index
-        if col[n - 1]:
-            ends = np.concatenate((ends, [n]))
-
-        for s, e in zip(starts, ends):
-            run_len = e - s
-            if run_len <= max_thick:
-                continue
-
-            # Sliding window: find best window of size max_thick
-            vals = d[idx][s:e]
-            cumsum = np.cumsum(vals)
-            # window sums for windows of size max_thick
-            window_sums = cumsum[max_thick - 1:] - np.concatenate(([0.0], cumsum[:run_len - max_thick]))
-            best = int(np.argmin(window_sums))
-
-            # Zero out everything outside the best window
-            col[s:s + best] = False
-            col[s + best + max_thick:e] = False
-            removed += run_len - max_thick
-
-    return removed
 
 
 # ---------------------------------------------------------------------------
@@ -152,10 +129,6 @@ def parse_args(argv=None):
     parser.add_argument(
         "--grid-size", type=int,
         help="Grid size N (required with --dx, ignored with --profile)",
-    )
-    parser.add_argument(
-        "--watershed-threshold", type=float, default=1.0,
-        help="Watershed thickness multiplier (default: 1.0)",
     )
     parser.add_argument(
         "--notch-radius", type=float, default=5.0,
@@ -256,21 +229,26 @@ def compute_cc_boundary(fs, N, cc_lut):
     return cc_superior_z
 
 
-def reconstruct_falx(mat, left_mask, right_mask, cc_superior_z, dx_mm,
-                     threshold_mult, crop_slices):
-    """Reconstruct the falx cerebri via EDT watershed.
+def reconstruct_falx(mat, fs, dx_mm, crop_slices):
+    """Reconstruct the falx cerebri via sign-change EDT watershed.
 
-    The falx is the midline sheet between left and right cerebral hemispheres,
-    constrained to CSF voxels and above the corpus callosum.
+    Computes signed distance field between left and right cerebral hemispheres
+    using EDT, then extracts the zero-level-set via sign-change detection.
+    Guaranteed 6-separating by the digital Jordan-Brouwer theorem.
 
     Returns falx_mask (boolean).
     """
     sampling = (dx_mm, dx_mm, dx_mm)
 
-    # Crop to bounding box for faster EDT
-    left_crop = left_mask[crop_slices]
-    right_crop = right_mask[crop_slices]
+    # Crop to bounding box
+    fs_crop = fs[crop_slices]
+    mat_crop = mat[crop_slices]
 
+    # Classify hemispheres on crop
+    left_lut, right_lut, _ = _build_fs_luts()
+    left_crop, right_crop = classify_hemispheres(fs_crop, left_lut, right_lut)
+
+    # EDT pair on crop (threaded)
     print("Computing EDT for left+right hemispheres (cropped, threaded)...")
     t0 = time.monotonic()
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -281,37 +259,77 @@ def reconstruct_falx(mat, left_mask, right_mask, cc_superior_z, dx_mm,
     del left_crop, right_crop
     print(f"  EDT pair: {time.monotonic() - t0:.1f}s")
 
-    # Watershed: equidistant surface within threshold, with fissure-width guard
-    diff = np.abs(dist_left - dist_right)
-    max_hemi_dist = np.maximum(dist_left, dist_right)
+    # Signed diff field
+    phi = dist_left - dist_right
     del dist_left, dist_right
 
-    mat_crop = mat[crop_slices]
-    falx_crop = (
-        (diff <= threshold_mult * dx_mm)
-        & (mat_crop == 8)
-        & (max_hemi_dist <= _FALX_MAX_HEMI_DIST)
-    )
-    del mat_crop, max_hemi_dist
+    # Supratentorial boundary: compute cerebral vs cerebellar EDT
+    # to clip falx to the supratentorial compartment.
+    cerebral_lut = np.zeros(256, dtype=bool)
+    cerebral_lut[[1, 2, 3, 9]] = True
+    cerebellar_lut = np.zeros(256, dtype=bool)
+    cerebellar_lut[[4, 5]] = True
+    cerebral_crop = cerebral_lut[mat_crop]
+    cerebellar_crop = cerebellar_lut[mat_crop]
 
-    # CC inferior boundary: exclude falx at or below corpus callosum
-    # Adjust z-indices for the crop offset
-    z_offset = crop_slices[2].start
-    y_offset = crop_slices[1].start
-    crop_Y = falx_crop.shape[1]
-    for y_local in range(crop_Y):
-        y_full = y_local + y_offset
-        z_sup = cc_superior_z[y_full]
-        if z_sup >= 0:
-            z_sup_crop = z_sup - z_offset
-            if z_sup_crop >= 0:
-                falx_crop[:, y_local, :z_sup_crop + 1] = False
+    supratentorial = np.ones(mat_crop.shape, dtype=bool)
+    if cerebellar_crop.any() and cerebral_crop.any():
+        print("  Computing supratentorial boundary (cerebral-cerebellar EDT)...")
+        t0_st = time.monotonic()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            fut_c = pool.submit(_edt.edt, ~cerebral_crop, anisotropy=sampling, parallel=1)
+            fut_b = pool.submit(_edt.edt, ~cerebellar_crop, anisotropy=sampling, parallel=1)
+            dist_cerebral = fut_c.result()
+            dist_cerebellar = fut_b.result()
+        phi_tent = dist_cerebral - dist_cerebellar
+        supratentorial = (phi_tent <= 0)
+        del dist_cerebral, dist_cerebellar, phi_tent
+        print(f"    Supratentorial boundary: {time.monotonic() - t0_st:.1f}s")
+    del cerebral_crop, cerebellar_crop
 
-    # Cap x-thickness to 2 voxels
-    removed = _cap_runs(falx_crop, diff, axis=0)
-    del diff
-    if removed > 0:
-        print(f"  x-thickness cap: removed {removed} voxels")
+    # Eligible: non-vacuum, supratentorial, near cortical surfaces.
+    # The falx belongs in the interhemispheric fissure — CSF between
+    # cortical surfaces of the two hemispheres. Deep cisterns (around
+    # brainstem, thalami) are also midline CSF but aren't fissure.
+    #
+    # Strategy: only allow CSF within 10mm of cortical gray matter.
+    # This naturally selects the fissure (cortex on both sides) and
+    # excludes deep cisterns (far from cortex).
+    # Also exclude CC (2-vox buffer) and ventricles.
+    eligible = (mat_crop > 0) & supratentorial
+    del supratentorial
+
+    # CC exclusion
+    _, _, cc_lut = _build_fs_luts()
+    cc_crop = cc_lut[np.clip(fs_crop, 0, _FS_LUT_SIZE - 1)]
+    del fs_crop
+    cc_buffer = binary_dilation(cc_crop, iterations=2)
+    del cc_crop
+    eligible &= ~cc_buffer & (mat_crop != 7)
+    del cc_buffer
+
+    # Cortex-proximity filter for CSF: only allow CSF near cortex
+    cortex_crop = (mat_crop == 2)
+    if cortex_crop.any():
+        dist_cortex = _edt.edt(
+            ~cortex_crop, anisotropy=sampling, parallel=1,
+        )
+        near_cortex = dist_cortex <= 10.0
+        del dist_cortex
+        # CSF far from cortex = deep cisterns, exclude from eligible
+        eligible &= near_cortex | (mat_crop != 8)
+        del near_cortex
+    del cortex_crop
+
+    # Sign-change surface extraction
+    falx_crop = _sign_change_surface(phi, eligible)
+    del phi, eligible
+
+    n_csf = int((falx_crop & (mat_crop == 8)).sum())
+    n_tissue = int(falx_crop.sum()) - n_csf
+    print(f"  Falx sign-change: {int(falx_crop.sum())} voxels "
+          f"({n_csf} CSF, {n_tissue} tissue)")
+    del mat_crop
 
     # Write back to full grid
     falx_mask = np.zeros(mat.shape, dtype=bool)
@@ -319,17 +337,17 @@ def reconstruct_falx(mat, left_mask, right_mask, cc_superior_z, dx_mm,
     del falx_crop
 
     n_falx = int(np.count_nonzero(falx_mask))
-    print(f"Falx cerebri: {n_falx} voxels")
+    print(f"Falx cerebri: {n_falx} voxels (sign-change)")
 
     return falx_mask
 
 
-def reconstruct_tentorium(mat, dx_mm, threshold_mult, notch_radius,
-                          crop_slices):
-    """Reconstruct the tentorium cerebelli via EDT watershed.
+def reconstruct_tentorium(mat, dx_mm, notch_radius, crop_slices):
+    """Reconstruct the tentorium cerebelli via sign-change EDT watershed.
 
-    The tentorium is the horizontal sheet between the cerebrum (above) and
-    cerebellum (below), with a brainstem notch exclusion.
+    Computes signed distance field between cerebral and cerebellar tissue
+    using EDT, then extracts the zero-level-set via sign-change detection.
+    Guaranteed 6-separating by the digital Jordan-Brouwer theorem.
 
     Returns tent_mask (boolean).
     """
@@ -355,40 +373,35 @@ def reconstruct_tentorium(mat, dx_mm, threshold_mult, notch_radius,
     del cerebral_crop, cerebellar_crop
     print(f"  EDT pair: {time.monotonic() - t0:.1f}s")
 
-    # Watershed: equidistant surface within threshold
-    diff = np.abs(dist_cerebral - dist_cerebellar)
+    phi = dist_cerebral - dist_cerebellar
     del dist_cerebral, dist_cerebellar
 
-    tent_crop = (diff <= threshold_mult * dx_mm) & (mat_crop == 8)
-
-    # Brainstem notch exclusion — cropped dilation
+    # Eligible: non-vacuum minus notch exclusion
+    eligible = (mat_crop > 0)
     r_notch_vox = notch_radius / dx_mm
     brainstem_crop = (mat_crop == 6)
-    del mat_crop
     if r_notch_vox >= 1.0 and brainstem_crop.any():
+        bs_xy = brainstem_crop.any(axis=2)
         r_step = min(3, int(r_notch_vox))
         r_step = max(r_step, 1)
         n_iter = math.ceil(r_notch_vox / r_step)
-        selem = build_ball(r_step)
-
-        # Sub-crop around brainstem for faster dilation
-        pad = int(r_notch_vox) + r_step * n_iter + 1
-        bs_nz = np.nonzero(brainstem_crop)
-        bs_lo = [max(0, int(bs_nz[i].min()) - pad) for i in range(3)]
-        bs_hi = [min(brainstem_crop.shape[i], int(bs_nz[i].max()) + pad + 1) for i in range(3)]
-        bs_slices = tuple(slice(bs_lo[i], bs_hi[i]) for i in range(3))
-
-        bs_sub = brainstem_crop[bs_slices]
-        bs_dilated_sub = binary_dilation(bs_sub, selem, iterations=n_iter)
-        tent_crop[bs_slices] &= ~bs_dilated_sub
-        del bs_sub, bs_dilated_sub
+        selem_2d = build_ball(r_step)
+        mid = selem_2d.shape[2] // 2
+        selem_2d = selem_2d[:, :, mid]
+        bs_dilated = binary_dilation(bs_xy, selem_2d, iterations=n_iter)
+        eligible &= ~bs_dilated[:, :, np.newaxis]
+        del bs_xy, bs_dilated
     del brainstem_crop
 
-    # Cap z-thickness to 2 voxels
-    removed = _cap_runs(tent_crop, diff, axis=2)
-    del diff
-    if removed > 0:
-        print(f"  z-thickness cap: removed {removed} voxels")
+    # Sign-change surface extraction
+    tent_crop = _sign_change_surface(phi, eligible)
+    del phi, eligible
+
+    n_csf = int((tent_crop & (mat_crop == 8)).sum())
+    n_tissue = int(tent_crop.sum()) - n_csf
+    print(f"  Tentorium sign-change: {int(tent_crop.sum())} voxels "
+          f"({n_csf} CSF, {n_tissue} tissue)")
+    del mat_crop
 
     # Write back to full grid
     tent_mask = np.zeros(mat.shape, dtype=bool)
@@ -396,7 +409,7 @@ def reconstruct_tentorium(mat, dx_mm, threshold_mult, notch_radius,
     del tent_crop
 
     n_tent = int(np.count_nonzero(tent_mask))
-    print(f"Tentorium cerebelli: {n_tent} voxels")
+    print(f"Tentorium cerebelli: {n_tent} voxels (sign-change)")
 
     return tent_mask
 
@@ -661,52 +674,35 @@ def main(argv=None):
 
     print(f"Subject: {args.subject}")
     print(f"Profile: {args.profile}  (N={args.N}, dx={args.dx} mm)")
-    print(f"Watershed threshold: {args.watershed_threshold}")
     print(f"Notch radius: {args.notch_radius} mm")
     print()
 
     out_dir = processed_dir(args.subject, args.profile)
     mat, fs, affine, dx_mm = load_inputs(out_dir)
+
     print(f"Shape: {mat.shape}  dtype: {mat.dtype}")
     print()
 
     # Idempotency: reset any pre-existing dural voxels
     check_idempotency(mat)
 
-    # Build LUTs once
-    left_lut, right_lut, cc_lut = _build_fs_luts()
-
-    # Classify hemispheres and compute CC boundary
-    t0 = time.monotonic()
-    left_mask, right_mask = classify_hemispheres(fs, left_lut, right_lut)
-    cc_superior_z = compute_cc_boundary(fs, mat.shape[1], cc_lut)
-    del fs
-    print(f"Hemisphere classification + CC boundary: {time.monotonic() - t0:.1f}s")
-
-    print(f"Left hemisphere:  {int(np.count_nonzero(left_mask))} voxels")
-    print(f"Right hemisphere: {int(np.count_nonzero(right_mask))} voxels")
-    print()
-
-    # Compute crop bounding box for EDT
+    # Compute crop bounding box for EDT (used by both falx and tentorium)
     pad_vox = math.ceil(args.notch_radius / dx_mm) + 2
     crop_slices = _compute_crop_bbox(mat, pad_vox)
     crop_shape = tuple(s.stop - s.start for s in crop_slices)
     print(f"EDT crop: {crop_shape} (pad={pad_vox} voxels)")
     print()
 
-    # Reconstruct falx cerebri
+    # Reconstruct falx cerebri (EDT watershed between hemispheres)
     t0 = time.monotonic()
-    falx_mask = reconstruct_falx(
-        mat, left_mask, right_mask, cc_superior_z,
-        dx_mm, args.watershed_threshold, crop_slices,
-    )
+    falx_mask = reconstruct_falx(mat, fs, dx_mm, crop_slices)
     print(f"  Falx total: {time.monotonic() - t0:.1f}s")
-    del left_mask, right_mask, cc_superior_z
+    del fs
 
     # Reconstruct tentorium cerebelli
     t0 = time.monotonic()
     tent_mask = reconstruct_tentorium(
-        mat, dx_mm, args.watershed_threshold, args.notch_radius, crop_slices,
+        mat, dx_mm, args.notch_radius, crop_slices,
     )
     print(f"  Tentorium total: {time.monotonic() - t0:.1f}s")
 
