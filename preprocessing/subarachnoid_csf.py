@@ -12,7 +12,7 @@ import sys
 
 import nibabel as nib
 import numpy as np
-from scipy.ndimage import label as cc_label
+from scipy.ndimage import distance_transform_edt, label as cc_label
 
 from preprocessing.utils import PROFILES, processed_dir
 from preprocessing.material_map import CLASS_NAMES, print_census
@@ -107,6 +107,68 @@ def save_material_map(out_dir, mat, affine):
 # ---------------------------------------------------------------------------
 # Core algorithm
 # ---------------------------------------------------------------------------
+def recover_fringe_tissue(mat, brain, dx_mm, max_dist_mm=1.0):
+    """Reclassify unlabeled brain-mask fringe voxels via nearest-neighbor
+    tissue assignment.
+
+    The brain mask (brainmask_fs) extends ~1-2mm beyond the aparc+aseg
+    parcellation boundary.  Voxels in this fringe have FS label 0 and map to
+    material 0 (vacuum).  Without correction, fill_subarachnoid_csf would
+    paint them all as CSF — but most are partial-volume cortex at the pial
+    surface.
+
+    Uses a dual-distance criterion to distinguish pial fringe from interior
+    sulcal CSF.  A voxel is classified as fringe (and recovered as tissue)
+    only if it is both:
+      1. Within max_dist_mm of a labeled tissue voxel (close to parenchyma)
+      2. Within max_dist_mm of the brain mask boundary (at the brain surface)
+
+    Interior sulcal voxels satisfy (1) but not (2) — they are deep inside
+    the brain mask, surrounded by brain on all sides.  These are preserved
+    as vacuum for the subsequent CSF fill.
+
+    Modifies mat in place.  Returns n_recovered.
+    """
+    # Tissue mask: parenchymal classes only (WM, GM, deep GM, cerebellar, brainstem)
+    tissue = (mat >= 1) & (mat <= 6)
+
+    # Unlabeled brain voxels that need assignment
+    unlabeled = (brain == 1) & (mat == 0)
+    n_unlabeled = int(unlabeled.sum())
+    if n_unlabeled == 0:
+        return 0
+
+    sampling = (dx_mm, dx_mm, dx_mm)
+
+    # Ensure threshold captures at least the first adjacent voxel layer,
+    # otherwise at coarse grids (e.g. debug 2.0mm) the threshold would be
+    # sub-voxel and recover nothing.
+    effective_dist = max(max_dist_mm, dx_mm)
+
+    # EDT from tissue boundary: distance and nearest-neighbor indices
+    # ~tissue is the "background" for the EDT — distance is measured from
+    # the nearest tissue voxel.
+    dist_tissue, indices = distance_transform_edt(~tissue, sampling=sampling,
+                                                  return_indices=True)
+
+    # EDT from brain mask boundary: distance inward from the nearest
+    # non-brain voxel.  Pial fringe voxels have small values (they are
+    # near the brain surface); interior sulcal voxels have large values.
+    dist_boundary = distance_transform_edt(brain == 1, sampling=sampling)
+
+    # Fringe: unlabeled, close to tissue, AND close to the brain surface
+    fringe = (unlabeled
+              & (dist_tissue <= effective_dist)
+              & (dist_boundary <= effective_dist))
+    n_recovered = int(fringe.sum())
+
+    # Copy material class from nearest tissue voxel
+    mat[fringe] = mat[indices[0][fringe], indices[1][fringe], indices[2][fringe]]
+
+    del dist_tissue, dist_boundary, indices
+    return n_recovered
+
+
 def fill_subarachnoid_csf(mat, sdf, brain):
     """Paint vacuum voxels inside the skull as subarachnoid CSF (u8=8).
 
@@ -228,6 +290,13 @@ def main(argv=None):
     out_dir = processed_dir(args.subject, args.profile)
     mat, sdf, brain, affine, dx_mm = load_inputs(out_dir)
     print(f"Shape: {mat.shape}  dtype: {mat.dtype}")
+    print()
+
+    # Recover fringe tissue before CSF fill
+    n_recovered = recover_fringe_tissue(mat, brain, dx_mm)
+    voxel_vol_ml = dx_mm ** 3 / 1000.0
+    print(f"Fringe tissue recovered: {n_recovered} voxels "
+          f"({n_recovered * voxel_vol_ml:.1f} mL)")
     print()
 
     # Core algorithm

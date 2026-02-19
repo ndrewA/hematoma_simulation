@@ -52,8 +52,15 @@ def parse_args(argv=None):
         help="Morphological closing radius in mm (default: 10.0)",
     )
     parser.add_argument(
-        "--dilate-radius", type=float, default=4.0,
-        help="Outward dilation radius in mm (default: 4.0)",
+        # 0.5mm matches the physiological subarachnoid space thickness over
+        # convexities in young adults (~1-2mm, but ceil to 1 source voxel at
+        # 0.7mm).  At coarse simulation grids (dev 1.0mm, debug 2.0mm) the
+        # resulting shell may be sub-voxel and not resolve as a continuous CSF
+        # layer in the material map.  This is a grid resolution limitation,
+        # not a reason to inflate the skull boundary — the SDF should represent
+        # the true anatomy regardless of simulation grid.
+        "--dilate-radius", type=float, default=0.5,
+        help="Outward dilation radius in mm (default: 0.5)",
     )
 
     args = parser.parse_args(argv)
@@ -139,37 +146,33 @@ def pad_inferior(brain_mask, head_mask, source_affine, pad_z, voxel_size):
     return brain_padded, head_padded, A_padded
 
 
-def morphological_close(brain_mask, r_close_vox, r_step=3):
-    """Morphological closing: dilation then erosion with iterated small ball.
+def morphological_close(brain_mask, r_close_vox):
+    """Morphological closing: dilation then erosion with exact-radius ball.
 
     Fills cortical sulci and interhemispheric fissure while preserving
     convex contours.
     """
-    ball = build_ball(r_step)
-    n_iter = math.ceil(r_close_vox / r_step)
-    effective = n_iter * r_step
+    ball = build_ball(r_close_vox)
 
-    print(f"Morphological closing: r_close_vox={r_close_vox}, "
-          f"r_step={r_step}, n_iter={n_iter}, effective={effective} voxels")
+    print(f"Morphological closing: r={r_close_vox} voxels, "
+          f"ball shape={ball.shape}")
 
     print("  Dilating...")
-    closed = binary_dilation(brain_mask, ball, iterations=n_iter)
+    closed = binary_dilation(brain_mask, ball, iterations=1)
     print("  Eroding...")
-    closed = binary_erosion(closed, ball, iterations=n_iter)
+    closed = binary_erosion(closed, ball, iterations=1)
 
     return closed
 
 
-def dilate_outward(closed, r_dilate_vox, r_step=3):
+def dilate_outward(closed, r_dilate_vox):
     """Outward dilation to approximate subarachnoid space thickness."""
-    ball = build_ball(r_step)
-    n_iter = math.ceil(r_dilate_vox / r_step)
-    effective = n_iter * r_step
+    ball = build_ball(r_dilate_vox)
 
-    print(f"Outward dilation: r_dilate_vox={r_dilate_vox}, "
-          f"n_iter={n_iter}, effective={effective} voxels")
+    print(f"Outward dilation: r={r_dilate_vox} voxels, "
+          f"ball shape={ball.shape}")
 
-    skull_interior = binary_dilation(closed, ball, iterations=n_iter)
+    skull_interior = binary_dilation(closed, ball, iterations=1)
     return skull_interior
 
 
@@ -221,7 +224,7 @@ def print_validation(sdf_sim, args, grid_affine, out_dir, r_dilate):
     # 1. Intracranial volume
     n_negative = int(np.count_nonzero(sdf_sim < 0))
     icv_ml = n_negative * dx ** 3 / 1000.0
-    status = "OK" if 1500 <= icv_ml <= 1750 else "WARN"
+    status = "OK" if 1300 <= icv_ml <= 1600 else "WARN"
     print(f"\n1. Intracranial volume (SDF < 0):")
     print(f"   {n_negative} voxels × {dx}³ mm³ = {icv_ml:.1f} mL  [{status}]")
 

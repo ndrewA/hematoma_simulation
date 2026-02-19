@@ -107,6 +107,52 @@ def _sign_change_surface(phi, eligible):
     return surface & eligible
 
 
+def _sign_change_surface_thin(phi, eligible):
+    """Extract 1-voxel-thick zero-level-set by picking the closer voxel.
+
+    For each sign-change face (where phi flips sign between two eligible
+    face-adjacent voxels), marks the voxel with smaller |phi| — i.e. the
+    one closer to the true zero-level-set.  This guarantees every
+    sign-change face has at least one marked voxel on its side, which is
+    sufficient for the face-centered finite-volume solver (7-point stencil,
+    harmonic-mean transmissibility).
+
+    Parameters
+    ----------
+    phi : ndarray, 3-D float
+        Signed distance field (dist_A - dist_B).
+    eligible : ndarray, 3-D bool
+        Non-vacuum mask. Only eligible voxels are marked.
+
+    Returns
+    -------
+    surface : ndarray, 3-D bool
+        The thinned membrane mask (1 voxel thick).
+    """
+    positive = phi >= 0
+    abs_phi = np.abs(phi)
+    surface = np.zeros(phi.shape, dtype=bool)
+
+    for ax in range(3):
+        lo = [slice(None)] * 3; hi = [slice(None)] * 3
+        lo[ax] = slice(None, -1); hi[ax] = slice(1, None)
+
+        sign_flip = positive[tuple(lo)] != positive[tuple(hi)]
+        both_elig = eligible[tuple(lo)] & eligible[tuple(hi)]
+        faces = sign_flip & both_elig
+
+        s_lo = [slice(None)] * 3; s_lo[ax] = slice(None, -1)
+        s_hi = [slice(None)] * 3; s_hi[ax] = slice(1, None)
+
+        lo_closer = faces & (abs_phi[tuple(lo)] <= abs_phi[tuple(hi)])
+        hi_closer = faces & (abs_phi[tuple(lo)] > abs_phi[tuple(hi)])
+
+        surface[tuple(s_lo)] |= lo_closer
+        surface[tuple(s_hi)] |= hi_closer
+
+    return surface
+
+
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -469,8 +515,9 @@ def reconstruct_tentorium(mat, dx_mm, notch_radius, crop_slices):
         del bs_xy, bs_dilated
     del brainstem_crop
 
-    # Sign-change surface extraction
-    tent_crop = _sign_change_surface(phi, eligible)
+    # Sign-change surface extraction (1-voxel thick; sufficient for
+    # face-connected solver stencil, real tentorium is <1 mm)
+    tent_crop = _sign_change_surface_thin(phi, eligible)
     del phi, eligible
 
     n_csf = int((tent_crop & (mat_crop == 8)).sum())

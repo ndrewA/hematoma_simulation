@@ -2,7 +2,7 @@
 
 Loads aparc+aseg.nii.gz and brainmask_fs.nii.gz from HCP T1w space,
 resamples both onto the simulation grid via nearest-neighbor interpolation,
-computes brain bounding box metadata, and saves three outputs:
+computes brain bounding box metadata, and saves outputs:
   - fs_labels_resampled.nii.gz  (int16)
   - brain_mask.nii.gz           (uint8)
   - grid_meta.json
