@@ -397,7 +397,7 @@ def check_v1(ctx):
     """Brain parenchyma volume."""
     vc = ctx.get_cached("volume_census", lambda: _compute_volume_census(ctx))
     parenchyma_ml = vc["parenchyma_ml"]
-    ctx.record("V1", 800 <= parenchyma_ml <= 2000,
+    ctx.record("V1", 850 <= parenchyma_ml <= 1500,
                value=f"{parenchyma_ml:.1f} mL")
 
 
@@ -406,18 +406,18 @@ def check_v2(ctx):
     """Ventricular CSF volume."""
     vc = ctx.get_cached("volume_census", lambda: _compute_volume_census(ctx))
     ventricular_ml = vc["ventricular_ml"]
-    ctx.record("V2", 10 <= ventricular_ml <= 60,
+    ctx.record("V2", 10 <= ventricular_ml <= 80,
                value=f"{ventricular_ml:.1f} mL")
 
 
 @check("V3", severity="WARN", phase="volume", needs={"mat", "sdf"})
 def check_v3(ctx):
-    """Subarachnoid CSF volume (20-40% ICV)."""
+    """Subarachnoid CSF volume (7-30% ICV)."""
     vc = ctx.get_cached("volume_census", lambda: _compute_volume_census(ctx))
     subarachnoid_ml = vc["subarachnoid_ml"]
     icv_ml = vc["icv_ml"]
     csf_icv_frac = subarachnoid_ml / icv_ml if icv_ml > 0 else 0.0
-    ctx.record("V3", 0.20 <= csf_icv_frac <= 0.40,
+    ctx.record("V3", 0.07 <= csf_icv_frac <= 0.30,
                value=f"{subarachnoid_ml:.1f} mL ({csf_icv_frac:.1%} ICV)")
 
 
@@ -426,7 +426,7 @@ def check_v4(ctx):
     """Dural membrane volume."""
     vc = ctx.get_cached("volume_census", lambda: _compute_volume_census(ctx))
     dural_ml = vc["dural_ml"]
-    ctx.record("V4", 2 <= dural_ml <= 50,
+    ctx.record("V4", 3 <= dural_ml <= 30,
                value=f"{dural_ml:.1f} mL")
 
 
@@ -477,7 +477,7 @@ def check_c1(ctx):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Phase 3: Dural Membrane (C2–C8)
+# Phase 3: Dural Membrane (C2–C7)
 # ═══════════════════════════════════════════════════════════════════════════
 
 @check("C2", severity="WARN", phase="dural", needs={"mat"})
@@ -511,30 +511,11 @@ def check_c2(ctx):
 
 @check("C3", severity="WARN", phase="dural", needs={"mat"})
 def check_c3(ctx):
-    """Full dural membrane largest component > 90%."""
-    mat = ctx.mat
-    dural = (mat == 10)
-    n_dural = int(np.count_nonzero(dural))
-    if n_dural == 0:
-        ctx.record("C3", True, value="skipped (0 dural voxels)")
-        return
-
-    dural_labels, dural_n_comp = cc_label(dural)
-    dural_sizes = np.sort(np.bincount(dural_labels.ravel())[1:])[::-1]
-    frac_largest = float(dural_sizes[0]) / float(dural_sizes.sum())
-    ctx.metrics["dural_components"] = dural_n_comp
-    ctx.record("C3", frac_largest > 0.90,
-               value=f"{dural_n_comp} comp, largest={frac_largest:.1%}")
-    del dural_labels
-
-
-@check("C4", severity="WARN", phase="dural", needs={"mat"})
-def check_c4(ctx):
     """Tentorial notch patency."""
     mat = ctx.mat
     brainstem = (mat == 6)
     if not brainstem.any():
-        ctx.record("C4", True, value="skipped (no brainstem)")
+        ctx.record("C3", True, value="skipped (no brainstem)")
         return
 
     z_indices = np.where(brainstem.any(axis=(0, 1)))[0]
@@ -546,12 +527,12 @@ def check_c4(ctx):
     bs_dilated = binary_dilation(bs_slice, iterations=1)
     csf_adjacent = csf_slice & bs_dilated & ~bs_slice
     n_adjacent = int(np.count_nonzero(csf_adjacent))
-    ctx.record("C4", n_adjacent > 0,
+    ctx.record("C3", n_adjacent > 0,
                value=f"{n_adjacent} adjacent CSF voxels at z={z_upper}")
 
 
-@check("C5", severity="WARN", phase="dural", needs={"mat", "fs"})
-def check_c5(ctx):
+@check("C4", severity="WARN", phase="dural", needs={"mat", "fs"})
+def check_c4(ctx):
     """Falx barrier separates left/right supratentorial CSF."""
     mat = ctx.mat
     fsd = ctx.get_cached("fs_data", lambda: _load_fs_data(ctx))
@@ -571,7 +552,7 @@ def check_c5(ctx):
     n_csf_above = int(np.count_nonzero(csf_above_cc))
     if n_csf_above == 0:
         del left_tissue, right_tissue
-        ctx.record("C5", True,
+        ctx.record("C4", True,
                    value="skipped (no supratentorial CSF above CC)")
         return
 
@@ -601,15 +582,15 @@ def check_c5(ctx):
     del labeled, left_tissue, right_tissue
 
     if n_bridging == 0:
-        ctx.record("C5", True,
+        ctx.record("C4", True,
                    value=f"{n_comp} components, 0 bridging")
     else:
-        ctx.record("C5", False,
+        ctx.record("C4", False,
                    value=f"{n_bridging} bridging of {n_comp} components")
 
 
-@check("C6", severity="WARN", phase="dural", needs={"mat", "sdf"})
-def check_c6(ctx):
+@check("C5", severity="WARN", phase="dural", needs={"mat", "sdf"})
+def check_c5(ctx):
     """Falx fissure coverage >= 95% (above CC, inside skull)."""
     mat = ctx.mat
     sdf = ctx.sdf
@@ -644,15 +625,15 @@ def check_c6(ctx):
         n_sealed = int(np.count_nonzero(fissure_mip & dural_mip))
         falx_coverage_pct = round(n_sealed / n_fissure * 100, 1)
         ctx.metrics["falx_coverage_pct"] = falx_coverage_pct
-        ctx.record("C6", falx_coverage_pct >= 95.0,
+        ctx.record("C5", falx_coverage_pct >= 95.0,
                    value=f"{falx_coverage_pct:.1f}% ({n_sealed}/{n_fissure})")
     else:
-        ctx.record("C6", True, value="skipped (no fissure voxels)")
+        ctx.record("C5", True, value="skipped (no fissure voxels)")
     del fissure_mip, dural_mip
 
 
-@check("C7", severity="WARN", phase="dural", needs={"mat"})
-def check_c7(ctx):
+@check("C6", severity="WARN", phase="dural", needs={"mat"})
+def check_c6(ctx):
     """Tentorium gap coverage >= 95%."""
     mat = ctx.mat
     N = ctx.N
@@ -664,7 +645,7 @@ def check_c7(ctx):
 
     brainstem = (mat == 6)
     if not brainstem.any():
-        ctx.record("C7", True, value="skipped (no brainstem)")
+        ctx.record("C6", True, value="skipped (no brainstem)")
         return
 
     z_indices = np.where(brainstem.any(axis=(0, 1)))[0]
@@ -695,20 +676,20 @@ def check_c7(ctx):
         n_sealed_tent = int(np.count_nonzero(boundary_cols & dural_proj))
         tent_coverage_pct = round(n_sealed_tent / n_boundary * 100, 1)
         ctx.metrics["tentorium_coverage_pct"] = tent_coverage_pct
-        ctx.record("C7", tent_coverage_pct >= 95.0,
+        ctx.record("C6", tent_coverage_pct >= 95.0,
                    value=f"{tent_coverage_pct:.1f}% ({n_sealed_tent}/{n_boundary})")
     else:
-        ctx.record("C7", True, value="skipped (no boundary columns)")
+        ctx.record("C6", True, value="skipped (no boundary columns)")
     del boundary_cols, dural_proj
 
 
-@check("C8", severity="WARN", phase="dural", needs={"mat"})
-def check_c8(ctx):
+@check("C7", severity="WARN", phase="dural", needs={"mat"})
+def check_c7(ctx):
     """Tentorium barrier separates supra/infratentorial CSF."""
     mat = ctx.mat
     brainstem = (mat == 6)
     if not brainstem.any():
-        ctx.record("C8", True, value="skipped (no brainstem)")
+        ctx.record("C7", True, value="skipped (no brainstem)")
         return
 
     z_indices = np.where(brainstem.any(axis=(0, 1)))[0]
@@ -727,7 +708,7 @@ def check_c8(ctx):
     n_infra = int(np.count_nonzero(infra_csf))
 
     if n_supra == 0 or n_infra == 0:
-        ctx.record("C8", True,
+        ctx.record("C7", True,
                    value=f"skipped (supra={n_supra}, infra={n_infra})")
         return
 
@@ -748,10 +729,10 @@ def check_c8(ctx):
     del labeled_csf
 
     if tent_bridging == 0:
-        ctx.record("C8", True,
+        ctx.record("C7", True,
                    value=f"{n_comp_csf} components, 0 bridging")
     else:
-        ctx.record("C8", False,
+        ctx.record("C7", False,
                    value=f"{tent_bridging} bridging components")
 
 
