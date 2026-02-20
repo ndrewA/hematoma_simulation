@@ -1,6 +1,8 @@
 simnibs_work/
 data/
 .claude
+CLAUDE.md
+session_logs/
 __pycache__/
 *.pyc
 .venv/

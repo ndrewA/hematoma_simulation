@@ -53,12 +53,31 @@ def load_our_sdf(out_dir):
     return sdf, affine, dx
 
 
-def load_simnibs(raw, grid_affine, grid_shape, dx):
+def load_simnibs(raw, grid_affine, grid_shape, dx, out_dir=None):
     """Resample SimNIBS final_tissues to our simulation grid.
 
-    Returns (labels_sim, simnibs_sdf) or (None, None) if file missing.
+    Caches the resampled labels and SDF to out_dir/validation/ so
+    subsequent runs skip the expensive resample + EDT (~5 min at 512³).
+
+    Returns (labels_sim, simnibs_sdf).
     """
-    # final_tissues.nii.gz lives in the subject dir, one level above T1w/
+    cache_dir = out_dir / "validation" if out_dir is not None else None
+    labels_cache = cache_dir / "simnibs_labels.nii.gz" if cache_dir else None
+    sdf_cache = cache_dir / "simnibs_sdf.nii.gz" if cache_dir else None
+
+    # Try loading from cache
+    if sdf_cache and sdf_cache.exists() and labels_cache and labels_cache.exists():
+        print(f"Loading cached {sdf_cache}")
+        labels_sim = np.asarray(
+            nib.load(str(labels_cache)).dataobj, dtype=np.int16
+        )
+        simnibs_sdf = np.asarray(
+            nib.load(str(sdf_cache)).dataobj, dtype=np.float32
+        )
+        print(f"SimNIBS SDF range: [{simnibs_sdf.min():.1f}, {simnibs_sdf.max():.1f}] mm")
+        return labels_sim, simnibs_sdf
+
+    # Compute from scratch
     path = raw.parent / "final_tissues.nii.gz"
     if not path.exists():
         print(f"FATAL: SimNIBS not found at {path}")
@@ -72,7 +91,7 @@ def load_simnibs(raw, grid_affine, grid_shape, dx):
         simnibs_data = simnibs_data[:, :, :, 0]
     simnibs_affine = simnibs_img.affine
 
-    print(f"Resampling SimNIBS to simulation grid ({grid_shape[0]}³, dx={dx} mm)...")
+    print(f"Resampling SimNIBS to simulation grid ({grid_shape[0]}^3, dx={dx} mm)...")
     labels_sim = resample_to_grid(
         (simnibs_data, simnibs_affine), grid_affine, grid_shape,
         order=0, cval=0, dtype=np.int16,
@@ -90,6 +109,14 @@ def load_simnibs(raw, grid_affine, grid_shape, dx):
     del dt_out, dt_in
 
     print(f"SimNIBS SDF range: [{simnibs_sdf.min():.1f}, {simnibs_sdf.max():.1f}] mm")
+
+    # Cache for next time
+    if cache_dir:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        nib.save(nib.Nifti1Image(labels_sim, grid_affine), str(labels_cache))
+        nib.save(nib.Nifti1Image(simnibs_sdf, grid_affine), str(sdf_cache))
+        print(f"Cached to {cache_dir}")
+
     return labels_sim, simnibs_sdf
 
 
@@ -328,7 +355,7 @@ def main(argv=None):
     grid_shape = our_sdf.shape
 
     # Load and resample SimNIBS
-    labels_sim, simnibs_sdf = load_simnibs(raw, grid_affine, grid_shape, dx)
+    labels_sim, simnibs_sdf = load_simnibs(raw, grid_affine, grid_shape, dx, out_dir)
 
     # Extract inner skull boundary
     inner_boundary = extract_inner_skull_boundary(labels_sim)

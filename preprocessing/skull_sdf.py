@@ -16,8 +16,11 @@ import sys
 
 import nibabel as nib
 import numpy as np
-from scipy.ndimage import binary_dilation, distance_transform_edt, gaussian_filter
+from scipy.ndimage import (
+    binary_dilation, binary_opening, distance_transform_edt, gaussian_filter,
+)
 
+from preprocessing.profiling import step
 from preprocessing.utils import PROFILES, processed_dir, raw_dir, resample_to_grid
 
 
@@ -220,8 +223,9 @@ def compute_signed_edt(skull_interior, voxel_size):
     sdf = dt_outside.astype(np.float32)
     del dt_outside
 
-    sigma_vox = 1.0 / voxel_size
-    print(f"Smoothing SDF: sigma=1.0 mm ({sigma_vox:.1f} voxels)")
+    sigma_mm = 2.0
+    sigma_vox = sigma_mm / voxel_size
+    print(f"Smoothing SDF: sigma={sigma_mm} mm ({sigma_vox:.1f} voxels)")
     sdf = gaussian_filter(sdf, sigma=sigma_vox).astype(np.float32)
 
     print(f"SDF range: [{sdf.min():.1f}, {sdf.max():.1f}] mm")
@@ -338,48 +342,59 @@ def main(argv=None):
 
     # 1. Load source masks
     raw = raw_dir(args.subject)
-    brain_mask, head_mask, source_affine = load_source_masks(raw)
-    voxel_size = extract_voxel_size(source_affine)
-    print()
+    with step("load sources"):
+        brain_mask, head_mask, source_affine = load_source_masks(raw)
+        voxel_size = extract_voxel_size(source_affine)
 
-    # 2. Load T2w and compute bone threshold
-    t2w = load_t2w(raw)
-    if t2w is None:
-        print("FATAL: T2w required for skull SDF construction")
-        sys.exit(1)
+        # 2. Load T2w and compute bone threshold
+        t2w = load_t2w(raw)
+        if t2w is None:
+            print("FATAL: T2w required for skull SDF construction")
+            sys.exit(1)
 
-    bone_threshold, threshold_stats = compute_bone_threshold(
-        t2w, brain_mask, args.bone_z,
-    )
-    if bone_threshold is None:
-        print("FATAL: could not compute T2w threshold")
-        sys.exit(1)
+        bone_threshold, threshold_stats = compute_bone_threshold(
+            t2w, brain_mask, args.bone_z,
+        )
+        if bone_threshold is None:
+            print("FATAL: could not compute T2w threshold")
+            sys.exit(1)
     print()
 
     # 3. T2w-guided growth
-    print("Growing skull interior from brain mask...")
-    skull_interior, n_iters = grow_skull_interior(
-        brain_mask, head_mask, t2w, voxel_size,
-        bone_threshold, args.max_growth,
-    )
-    n_brain = int(brain_mask.sum())
-    n_grown = int(skull_interior.sum()) - n_brain
+    with step("T2w-guided growth"):
+        print("Growing skull interior from brain mask...")
+        skull_interior, n_iters = grow_skull_interior(
+            brain_mask, head_mask, t2w, voxel_size,
+            bone_threshold, args.max_growth,
+        )
+        n_brain = int(brain_mask.sum())
+        n_grown = int(skull_interior.sum()) - n_brain
 
-    growth_stats = {
-        "iterations": n_iters,
-        "brain_voxels": n_brain,
-        "grown_voxels": n_grown,
-        "total_voxels": n_brain + n_grown,
-        **threshold_stats,
-    }
-    print(f"Growth: {n_iters} iterations, +{n_grown:,} voxels "
-          f"({n_brain + n_grown:,} total)")
-    del brain_mask, head_mask, t2w
+        # Morphological opening: remove single-voxel protrusions from the
+        # growth front that cause sawtooth artifacts in the SDF contour.
+        # Re-add the brain mask so opening never erodes inside the brain.
+        n_before_open = int(skull_interior.sum())
+        skull_interior = binary_opening(skull_interior) | brain_mask
+        n_removed = n_before_open - int(skull_interior.sum())
+        print(f"Opening: removed {n_removed:,} voxels")
+
+        growth_stats = {
+            "iterations": n_iters,
+            "brain_voxels": n_brain,
+            "grown_voxels": n_grown,
+            "opening_removed": n_removed,
+            "total_voxels": int(skull_interior.sum()),
+            **threshold_stats,
+        }
+        print(f"Growth: {n_iters} iterations, +{n_grown:,} voxels "
+              f"({int(skull_interior.sum()):,} total)")
+        del brain_mask, head_mask, t2w
     print()
 
     # 4. Signed EDT
-    sdf_source = compute_signed_edt(skull_interior, voxel_size)
-    del skull_interior
+    with step("signed EDT + smooth"):
+        sdf_source = compute_signed_edt(skull_interior, voxel_size)
+        del skull_interior
     print()
 
     # 5. Resample to simulation grid
@@ -390,12 +405,13 @@ def main(argv=None):
     )
     grid_shape = (N_meta, N_meta, N_meta)
 
-    print(f"Resampling SDF to simulation grid ({N_meta}^3, dx={args.dx} mm)...")
-    sdf_sim = resample_to_grid(
-        (sdf_source, source_affine), grid_affine, grid_shape,
-        order=1, cval=100.0, dtype=np.float32,
-    )
-    del sdf_source
+    with step("resample to grid"):
+        print(f"Resampling SDF to simulation grid ({N_meta}^3, dx={args.dx} mm)...")
+        sdf_sim = resample_to_grid(
+            (sdf_source, source_affine), grid_affine, grid_shape,
+            order=1, cval=100.0, dtype=np.float32,
+        )
+        del sdf_source
     print()
 
     # 6. Brain containment clamp

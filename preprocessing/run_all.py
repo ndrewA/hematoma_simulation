@@ -16,8 +16,8 @@ Usage:
 import argparse
 import importlib
 import sys
-import time
 
+from preprocessing.profiling import step
 from preprocessing.utils import PROFILES
 
 
@@ -89,44 +89,30 @@ def main(argv=None):
     print(f"  Grid: {args.N}^3, dx={args.dx} mm")
     print("=" * 60)
 
-    t_total = time.monotonic()
+    with step("Pipeline total"):
+        for step_name, module_name in STEPS:
+            print(f"\n{'─' * 60}")
+            print(f"  {step_name}")
+            print(f"{'─' * 60}\n")
 
-    for step_name, module_name in STEPS:
-        print(f"\n{'─' * 60}")
-        print(f"  {step_name}")
-        print(f"{'─' * 60}\n")
+            try:
+                mod = importlib.import_module(module_name)
+            except ImportError as e:
+                print(f"FATAL: Could not import {module_name}: {e}")
+                sys.exit(1)
 
-        t_step = time.monotonic()
+            step_argv = build_step_argv(module_name, subject, profile)
 
-        try:
-            mod = importlib.import_module(module_name)
-        except ImportError as e:
-            print(f"FATAL: Could not import {module_name}: {e}")
-            sys.exit(1)
-
-        step_argv = build_step_argv(module_name, subject, profile)
-
-        try:
-            mod.main(step_argv)
-        except SystemExit as e:
-            if e.code is not None and e.code != 0:
-                elapsed = time.monotonic() - t_step
-                print(f"\nFATAL: {step_name} exited with code {e.code} "
-                      f"after {elapsed:.1f}s")
-                sys.exit(e.code)
-        except Exception as e:
-            elapsed = time.monotonic() - t_step
-            print(f"\nFATAL: {step_name} raised {type(e).__name__}: {e} "
-                  f"after {elapsed:.1f}s")
-            sys.exit(1)
-
-        elapsed = time.monotonic() - t_step
-        print(f"\n  [{step_name} completed in {elapsed:.1f}s]")
-
-    total = time.monotonic() - t_total
-    print(f"\n{'=' * 60}")
-    print(f"  Pipeline complete: {total:.1f}s total")
-    print(f"{'=' * 60}")
+            with step(step_name):
+                try:
+                    mod.main(step_argv)
+                except SystemExit as e:
+                    if e.code is not None and e.code != 0:
+                        print(f"\nFATAL: {step_name} exited with code {e.code}")
+                        sys.exit(e.code)
+                except Exception as e:
+                    print(f"\nFATAL: {step_name} raised {type(e).__name__}: {e}")
+                    sys.exit(1)
 
 
 if __name__ == "__main__":

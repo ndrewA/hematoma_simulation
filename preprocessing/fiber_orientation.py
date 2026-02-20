@@ -15,6 +15,8 @@ from pathlib import Path
 import nibabel as nib
 import numpy as np
 
+from preprocessing.profiling import step
+
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 # ---------------------------------------------------------------------------
@@ -391,10 +393,11 @@ def main(argv=None):
     out_dir = _PROJECT_ROOT / "data" / "processed" / subject
 
     # 1. Load bedpostX
-    print("--- Loading bedpostX data ---")
-    dyads, fracs, brain_mask, diff_affine = load_bedpostx(bedpostx_dir)
-    shape = dyads[0].shape[:3]
-    print(f"Shape: {shape}  Brain voxels: {int(np.count_nonzero(brain_mask))}")
+    with step("load bedpostX"):
+        print("--- Loading bedpostX data ---")
+        dyads, fracs, brain_mask, diff_affine = load_bedpostx(bedpostx_dir)
+        shape = dyads[0].shape[:3]
+        print(f"Shape: {shape}  Brain voxels: {int(np.count_nonzero(brain_mask))}")
     print()
 
     # 2. Threshold fractions
@@ -406,9 +409,10 @@ def main(argv=None):
     print_coverage(fracs, brain_mask)
 
     # 3. Compute structure tensor
-    print("\n--- Computing structure tensor M_0 ---")
-    M0 = compute_structure_tensor(dyads, fracs)
-    print(f"M0 shape: {M0.shape}  dtype: {M0.dtype}")
+    with step("compute structure tensor"):
+        print("\n--- Computing structure tensor M_0 ---")
+        M0 = compute_structure_tensor(dyads, fracs)
+        print(f"M0 shape: {M0.shape}  dtype: {M0.dtype}")
     print()
 
     # 4. WM mask via FS labels

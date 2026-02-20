@@ -11,7 +11,6 @@ Overwrites material_map.nii.gz in place (no new output files).
 import argparse
 import json
 import math
-import time
 from concurrent.futures import ThreadPoolExecutor
 
 import edt as _edt
@@ -24,6 +23,7 @@ from scipy.ndimage import (
 )
 from scipy.spatial import ConvexHull, cKDTree
 
+from preprocessing.profiling import step
 from preprocessing.utils import PROFILES, build_ball, processed_dir, raw_dir
 from preprocessing.material_map import CLASS_NAMES, print_census
 
@@ -296,14 +296,13 @@ def reconstruct_falx(mat, fs, dx_mm, crop_slices):
 
     # EDT pair on crop (threaded)
     print("Computing EDT for left+right hemispheres (cropped, threaded)...")
-    t0 = time.monotonic()
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        fut_l = pool.submit(_edt.edt, ~left_crop, anisotropy=sampling, parallel=1)
-        fut_r = pool.submit(_edt.edt, ~right_crop, anisotropy=sampling, parallel=1)
-        dist_left = fut_l.result()
-        dist_right = fut_r.result()
+    with step("EDT pair (L/R hemispheres)"):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            fut_l = pool.submit(_edt.edt, ~left_crop, anisotropy=sampling, parallel=1)
+            fut_r = pool.submit(_edt.edt, ~right_crop, anisotropy=sampling, parallel=1)
+            dist_left = fut_l.result()
+            dist_right = fut_r.result()
     del left_crop, right_crop
-    print(f"  EDT pair: {time.monotonic() - t0:.1f}s")
 
     # Signed diff field
     phi = dist_left - dist_right
@@ -321,16 +320,15 @@ def reconstruct_falx(mat, fs, dx_mm, crop_slices):
     supratentorial = np.ones(mat_crop.shape, dtype=bool)
     if cerebellar_crop.any() and cerebral_crop.any():
         print("  Computing supratentorial boundary (cerebral-cerebellar EDT)...")
-        t0_st = time.monotonic()
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            fut_c = pool.submit(_edt.edt, ~cerebral_crop, anisotropy=sampling, parallel=1)
-            fut_b = pool.submit(_edt.edt, ~cerebellar_crop, anisotropy=sampling, parallel=1)
-            dist_cerebral = fut_c.result()
-            dist_cerebellar = fut_b.result()
-        phi_tent = dist_cerebral - dist_cerebellar
-        supratentorial = (phi_tent <= 0)
-        del dist_cerebral, dist_cerebellar, phi_tent
-        print(f"    Supratentorial boundary: {time.monotonic() - t0_st:.1f}s")
+        with step("supratentorial boundary"):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                fut_c = pool.submit(_edt.edt, ~cerebral_crop, anisotropy=sampling, parallel=1)
+                fut_b = pool.submit(_edt.edt, ~cerebellar_crop, anisotropy=sampling, parallel=1)
+                dist_cerebral = fut_c.result()
+                dist_cerebellar = fut_b.result()
+            phi_tent = dist_cerebral - dist_cerebellar
+            supratentorial = (phi_tent <= 0)
+            del dist_cerebral, dist_cerebellar, phi_tent
     del cerebral_crop, cerebellar_crop
 
     # Eligible: only CSF and cortical GM, supratentorial.
@@ -486,14 +484,13 @@ def reconstruct_tentorium(mat, dx_mm, notch_radius, crop_slices):
     cerebellar_crop = cerebellar_lut[mat_crop]
 
     print("Computing EDT for cerebral+cerebellar tissue (cropped, threaded)...")
-    t0 = time.monotonic()
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        fut_c = pool.submit(_edt.edt, ~cerebral_crop, anisotropy=sampling, parallel=1)
-        fut_b = pool.submit(_edt.edt, ~cerebellar_crop, anisotropy=sampling, parallel=1)
-        dist_cerebral = fut_c.result()
-        dist_cerebellar = fut_b.result()
+    with step("EDT pair (cerebral/cerebellar)"):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            fut_c = pool.submit(_edt.edt, ~cerebral_crop, anisotropy=sampling, parallel=1)
+            fut_b = pool.submit(_edt.edt, ~cerebellar_crop, anisotropy=sampling, parallel=1)
+            dist_cerebral = fut_c.result()
+            dist_cerebellar = fut_b.result()
     del cerebral_crop, cerebellar_crop
-    print(f"  EDT pair: {time.monotonic() - t0:.1f}s")
 
     phi = dist_cerebral - dist_cerebellar
     del dist_cerebral, dist_cerebellar
@@ -806,7 +803,6 @@ def print_junction_thickness(falx_mask, tent_mask, dx_mm, mat):
 # ---------------------------------------------------------------------------
 def main(argv=None):
     """Orchestrate dural membrane reconstruction."""
-    t_total = time.monotonic()
     args = parse_args(argv)
 
     print(f"Subject: {args.subject}")
@@ -815,7 +811,9 @@ def main(argv=None):
     print()
 
     out_dir = processed_dir(args.subject, args.profile)
-    mat, fs, affine, dx_mm = load_inputs(out_dir)
+
+    with step("load inputs"):
+        mat, fs, affine, dx_mm = load_inputs(out_dir)
 
     print(f"Shape: {mat.shape}  dtype: {mat.dtype}")
     print()
@@ -831,17 +829,15 @@ def main(argv=None):
     print()
 
     # Reconstruct falx cerebri (EDT watershed between hemispheres)
-    t0 = time.monotonic()
-    falx_mask = reconstruct_falx(mat, fs, dx_mm, crop_slices)
-    print(f"  Falx total: {time.monotonic() - t0:.1f}s")
+    with step("reconstruct falx"):
+        falx_mask = reconstruct_falx(mat, fs, dx_mm, crop_slices)
     del fs
 
     # Reconstruct tentorium cerebelli
-    t0 = time.monotonic()
-    tent_mask = reconstruct_tentorium(
-        mat, dx_mm, args.notch_radius, crop_slices,
-    )
-    print(f"  Tentorium total: {time.monotonic() - t0:.1f}s")
+    with step("reconstruct tentorium"):
+        tent_mask = reconstruct_tentorium(
+            mat, dx_mm, args.notch_radius, crop_slices,
+        )
 
     # Merge into material map
     n_falx, n_tent, n_overlap, n_total = merge_dural(mat, falx_mask, tent_mask)
@@ -863,8 +859,6 @@ def main(argv=None):
     # Save
     print()
     save_material_map(out_dir, mat, affine)
-
-    print(f"\nTotal wall time: {time.monotonic() - t_total:.1f}s")
 
 
 if __name__ == "__main__":

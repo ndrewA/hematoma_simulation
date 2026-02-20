@@ -278,86 +278,68 @@ def generate_fig2(mat, t1w, N, subject, profile, dx, path):
 # ---------------------------------------------------------------------------
 
 def generate_fig3(mat, sdf, t1w, brain, N, subject, profile, dx, path):
-    """Skull SDF + domain boundary: 2x3 panels."""
-    from scipy.ndimage import binary_dilation
+    """Skull SDF + domain boundary: multi-slice triplanar grid.
 
-    mid = N // 2
-
+    Row 0-2: Axial slices (inferior → superior)
+    Row 3-5: Coronal slices (posterior → anterior)
+    Row 6-8: Sagittal slices (left → right)
+    Each row has 3 evenly spaced slices through the brain extent.
+    """
     contour_levels = [-20, -10, -5, 0, 5, 10]
     contour_colors = ["#0000FF", "#4444FF", "#8888FF", "#00FF00", "#FF8888", "#FF0000"]
-    contour_lw = [0.5, 0.5, 0.5, 2.0, 0.5, 0.5]
+    contour_lw = [0.3, 0.3, 0.3, 1.0, 0.3, 0.3]
 
-    sdf_slices = [sdf[mid, :, :], sdf[:, mid, :], sdf[:, :, mid]]
-    t1w_slices = ([t1w[mid, :, :], t1w[:, mid, :], t1w[:, :, mid]]
-                  if t1w is not None else [None, None, None])
-    brain_slices = [brain[mid, :, :], brain[:, mid, :], brain[:, :, mid]]
-    titles = ["Axial (z)", "Coronal (y)", "Sagittal (x)"]
+    # Find brain extent on each axis
+    def _brain_range(axis):
+        slices = np.where(brain.any(axis=tuple(i for i in range(3) if i != axis)))[0]
+        return int(slices[0]), int(slices[-1])
 
-    fig, axes = plt.subplots(2, 3, figsize=(14, 9))
+    def _pick_slices(lo, hi, n=3):
+        margin = (hi - lo) // (2 * (n + 1))
+        return np.linspace(lo + margin, hi - margin, n).astype(int).tolist()
+
+    ax_lo, ax_hi = _brain_range(2)  # axial = axis 2
+    cor_lo, cor_hi = _brain_range(1)  # coronal = axis 1
+    sag_lo, sag_hi = _brain_range(0)  # sagittal = axis 0
+
+    axial_zs = _pick_slices(ax_lo, ax_hi)
+    coronal_ys = _pick_slices(cor_lo, cor_hi)
+    sagittal_xs = _pick_slices(sag_lo, sag_hi)
+
+    nrows = 3
+    ncols = 3
+    fig, axes = plt.subplots(nrows, ncols, figsize=(14, 14))
     fig.suptitle(f"Skull SDF + Domain Boundary — {subject} / {profile}",
                  fontsize=14, fontweight="bold")
 
-    for col in range(3):
-        ax = axes[0, col]
-        if t1w_slices[col] is not None:
-            ax.imshow(t1w_slices[col].T, origin="lower", cmap="gray",
+    def _plot_sdf(ax, sdf_slc, t1w_slc, brain_slc, title):
+        if t1w_slc is not None:
+            ax.imshow(t1w_slc.T, origin="lower", cmap="gray",
                       interpolation="nearest")
-        ax.contour(sdf_slices[col].T, levels=contour_levels,
+        ax.contour(sdf_slc.T, levels=contour_levels,
                    colors=contour_colors, linewidths=contour_lw)
-        ax.set_title(f"{titles[col]} — SDF contours", fontsize=9)
+        ax.contour(brain_slc.astype(float).T, levels=[0.5],
+                   colors=["#4444FF"], linewidths=[0.5], linestyles="dotted")
+        ax.set_title(title, fontsize=9)
         ax.axis("off")
 
-    ax = axes[1, 0]
-    im = ax.imshow(sdf[mid, :, :].T, origin="lower", cmap="RdBu_r",
-                   vmin=-30, vmax=30, interpolation="nearest")
-    ax.set_title("Axial — SDF colormap", fontsize=9)
-    ax.axis("off")
-    plt.colorbar(im, ax=ax, shrink=0.7, label="SDF (mm)")
+    # Row 0: Axial slices
+    for col, z in enumerate(axial_zs):
+        _plot_sdf(axes[0, col],
+                  sdf[:, :, z], t1w[:, :, z] if t1w is not None else None,
+                  brain[:, :, z], f"Axial z={z}")
 
-    ax = axes[1, 1]
-    ax.imshow(sdf[:, mid, :].T, origin="lower", cmap="RdBu_r",
-              vmin=-30, vmax=30, interpolation="nearest")
-    brain_dilated = binary_dilation(brain_slices[1])
-    brain_boundary = brain_dilated & ~brain_slices[1].astype(bool)
-    boundary_overlay = np.zeros(brain_boundary.shape + (4,))
-    boundary_overlay[brain_boundary, :] = [0.0, 1.0, 0.0, 0.8]
-    ax.imshow(np.transpose(boundary_overlay, (1, 0, 2)),
-              origin="lower", interpolation="nearest")
-    ax.set_title("Coronal — brain boundary on SDF", fontsize=9)
-    ax.axis("off")
+    # Row 1: Coronal slices
+    for col, y in enumerate(coronal_ys):
+        _plot_sdf(axes[1, col],
+                  sdf[:, y, :], t1w[:, y, :] if t1w is not None else None,
+                  brain[:, y, :], f"Coronal y={y}")
 
-    ax = axes[1, 2]
-    # Zoom into the left Sylvian fissure region: find the skull surface
-    # (SDF≈0) on the left lateral side and center the window on it.
-    sdf_coronal = sdf[:, mid, :]
-    half = min(40, N // 4)
-    # Find the actual skull surface (SDF closest to 0) on the left side
-    brain_coronal = brain[:, mid, :]
-    if brain_coronal.any():
-        brain_zs = np.where(brain_coronal.any(axis=0))[0]
-        z_center = int((brain_zs[0] + brain_zs[-1]) // 2)
-        # Find x where SDF≈0 at z_center on the left half
-        sdf_row = sdf_coronal[:mid, z_center]
-        x_skull = int(np.argmin(np.abs(sdf_row)))
-        x_lo = max(0, x_skull - half)
-        x_hi = min(N, x_skull + half)
-        z_lo = max(0, z_center - half)
-        z_hi = min(N, z_center + half)
-    else:
-        x_lo, x_hi = max(0, mid - half), min(N, mid + half)
-        z_lo, z_hi = max(0, mid - half), min(N, mid + half)
-    sdf_zoom = sdf[x_lo:x_hi, mid, z_lo:z_hi]
-    # T1w underlay with SDF contour lines for anatomical context
-    if t1w is not None:
-        ax.imshow(t1w[x_lo:x_hi, mid, z_lo:z_hi].T, origin="lower",
-                  cmap="gray", interpolation="nearest")
-    else:
-        ax.imshow(sdf_zoom.T, origin="lower", cmap="RdBu_r",
-                  vmin=-15, vmax=15, interpolation="nearest")
-    ax.contour(sdf_zoom.T, levels=contour_levels, colors=contour_colors,
-               linewidths=[lw * 1.5 for lw in contour_lw])
-    ax.set_title("Sylvian zoom — left lateral (coronal)", fontsize=9)
-    ax.axis("off")
+    # Row 2: Sagittal slices
+    for col, x in enumerate(sagittal_xs):
+        _plot_sdf(axes[2, col],
+                  sdf[x, :, :], t1w[x, :, :] if t1w is not None else None,
+                  brain[x, :, :], f"Sagittal x={x}")
 
     plt.tight_layout(rect=[0, 0, 1, 0.95])
     fig.savefig(str(path), dpi=300, bbox_inches="tight")

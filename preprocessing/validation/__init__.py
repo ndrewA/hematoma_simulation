@@ -20,13 +20,13 @@ import argparse
 import json
 import os
 import sys
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 import nibabel as nib
 import numpy as np
 
+from preprocessing.profiling import step
 from preprocessing.utils import PROFILES, processed_dir, raw_dir
 
 
@@ -433,7 +433,6 @@ def _parse_figure_set(only_figures):
 
 def main(argv=None):
     """Orchestrate cross-cutting validation."""
-    t_total = time.monotonic()
     args = parse_args(argv)
     subject = args.subject
     profile = args.profile
@@ -471,15 +470,16 @@ def main(argv=None):
 
     if figures_only:
         from preprocessing.validation.figures import generate_all_figures
-        generate_all_figures(ctx, which=figure_set)
-        print(f"\n  Total wall time: {time.monotonic() - t_total:.1f}s")
+        with step("generate figures"):
+            generate_all_figures(ctx, which=figure_set)
         return
 
     if not no_fiber and not paths["fiber"].exists():
         print(f"WARNING: fiber_M0 not found, skipping fiber checks")
         no_fiber = True
 
-    run_checks(ctx, selected, no_dural, no_fiber)
+    with step("run checks"):
+        run_checks(ctx, selected, no_dural, no_fiber)
 
     # Abort early on critical header failures
     critical_fails = [r for r in ctx.results
@@ -505,7 +505,8 @@ def main(argv=None):
     # Figures
     if not no_images:
         from preprocessing.validation.figures import generate_all_figures
-        generate_all_figures(ctx)
+        with step("generate figures"):
+            generate_all_figures(ctx)
 
     # Write JSON report
     report = build_report(subject, profile, N, dx,
@@ -520,5 +521,3 @@ def main(argv=None):
     # Console summary
     print_console_summary(ctx.results, ctx.census, ctx.metrics,
                           subject, profile, N, dx)
-
-    print(f"\n  Total wall time: {time.monotonic() - t_total:.1f}s")

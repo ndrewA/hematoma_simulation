@@ -14,6 +14,7 @@ import nibabel as nib
 import numpy as np
 from scipy.ndimage import distance_transform_edt, label as cc_label
 
+from preprocessing.profiling import step
 from preprocessing.utils import PROFILES, processed_dir
 from preprocessing.material_map import CLASS_NAMES, print_census
 
@@ -288,19 +289,23 @@ def main(argv=None):
     print()
 
     out_dir = processed_dir(args.subject, args.profile)
-    mat, sdf, brain, affine, dx_mm = load_inputs(out_dir)
+
+    with step("load inputs"):
+        mat, sdf, brain, affine, dx_mm = load_inputs(out_dir)
     print(f"Shape: {mat.shape}  dtype: {mat.dtype}")
     print()
 
     # Recover fringe tissue before CSF fill
-    n_recovered = recover_fringe_tissue(mat, brain, dx_mm)
+    with step("fringe tissue recovery"):
+        n_recovered = recover_fringe_tissue(mat, brain, dx_mm)
     voxel_vol_ml = dx_mm ** 3 / 1000.0
     print(f"Fringe tissue recovered: {n_recovered} voxels "
           f"({n_recovered * voxel_vol_ml:.1f} mL)")
     print()
 
     # Core algorithm
-    n_sulcal, n_shell, sulcal, shell = fill_subarachnoid_csf(mat, sdf, brain)
+    with step("fill CSF"):
+        n_sulcal, n_shell, sulcal, shell = fill_subarachnoid_csf(mat, sdf, brain)
     print(f"Sulcal CSF: {n_sulcal} voxels painted")
     print(f"Shell CSF:  {n_shell} voxels painted")
 

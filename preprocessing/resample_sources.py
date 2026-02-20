@@ -15,6 +15,7 @@ import sys
 import nibabel as nib
 import numpy as np
 
+from preprocessing.profiling import step
 from preprocessing.utils import (
     PROFILES,
     build_grid_affine,
@@ -274,20 +275,22 @@ def main(argv=None):
     grid_affine = build_grid_affine(N, dx)
 
     # Resample labels
-    print("Resampling labels (nearest-neighbor)...")
-    labels_resampled = resample_to_grid(
-        (labels_data, source_affine), grid_affine, grid_shape,
-        order=0, cval=0, dtype=np.int16,
-    )
-    del labels_data  # free memory before next resample
+    with step("resample aparc+aseg"):
+        print("Resampling labels (nearest-neighbor)...")
+        labels_resampled = resample_to_grid(
+            (labels_data, source_affine), grid_affine, grid_shape,
+            order=0, cval=0, dtype=np.int16,
+        )
+        del labels_data  # free memory before next resample
 
     # Resample mask
-    print("Resampling brain mask (nearest-neighbor)...")
-    mask_resampled = resample_to_grid(
-        (mask_data, source_affine), grid_affine, grid_shape,
-        order=0, cval=0, dtype=np.uint8,
-    )
-    del mask_data
+    with step("resample brainmask"):
+        print("Resampling brain mask (nearest-neighbor)...")
+        mask_resampled = resample_to_grid(
+            (mask_data, source_affine), grid_affine, grid_shape,
+            order=0, cval=0, dtype=np.uint8,
+        )
+        del mask_data
 
     # Compute brain bounding box
     bbox_min, bbox_max, centroid, n_voxels = compute_brain_bbox(mask_resampled)
