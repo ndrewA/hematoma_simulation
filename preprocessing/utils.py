@@ -8,7 +8,7 @@ from pathlib import Path
 
 import nibabel as nib
 import numpy as np
-from scipy.ndimage import map_coordinates
+from scipy.ndimage import affine_transform
 
 # ---------------------------------------------------------------------------
 # Profile configs: name -> (N, dx_mm)
@@ -39,7 +39,10 @@ def build_grid_affine(N, dx_mm):
 # ---------------------------------------------------------------------------
 def resample_to_grid(source, grid_affine, grid_shape, order=0, cval=0.0,
                      dtype=None, slab_size=32):
-    """Resample a volume onto the simulation grid using slab-based processing.
+    """Resample a volume onto the simulation grid.
+
+    Uses scipy.ndimage.affine_transform (single C call) for the
+    composite transform: grid voxel → source voxel.
 
     Parameters
     ----------
@@ -56,7 +59,7 @@ def resample_to_grid(source, grid_affine, grid_shape, order=0, cval=0.0,
     dtype : numpy dtype or None
         Output dtype. If None, inferred from source.
     slab_size : int
-        Number of slices per slab along axis 0.
+        Unused (kept for backward compatibility).
 
     Returns
     -------
@@ -76,41 +79,18 @@ def resample_to_grid(source, grid_affine, grid_shape, order=0, cval=0.0,
     target_dtype = np.dtype(dtype)
     round_int = order == 0 and np.issubdtype(target_dtype, np.integer)
 
-    # --- Composite transform: grid voxel -> source voxel ---
+    # Composite transform: grid voxel -> source voxel
     M = np.linalg.inv(source_affine) @ grid_affine
 
-    Ni, Nj, Nk = grid_shape
-    out = np.empty(grid_shape, dtype=target_dtype)
+    out = affine_transform(
+        source_data, M[:3, :3], M[:3, 3],
+        output_shape=grid_shape, order=order,
+        mode='constant', cval=float(cval),
+    )
 
-    for i_start in range(0, Ni, slab_size):
-        i_end = min(i_start + slab_size, Ni)
-
-        # Build grid coordinates for this slab
-        ii = np.arange(i_start, i_end, dtype=np.float64)
-        jj = np.arange(Nj, dtype=np.float64)
-        kk = np.arange(Nk, dtype=np.float64)
-        gi, gj, gk = np.meshgrid(ii, jj, kk, indexing='ij')
-
-        # Apply affine: source_coords = M @ [i, j, k, 1]^T
-        si = M[0, 0] * gi + M[0, 1] * gj + M[0, 2] * gk + M[0, 3]
-        sj = M[1, 0] * gi + M[1, 1] * gj + M[1, 2] * gk + M[1, 3]
-        sk = M[2, 0] * gi + M[2, 1] * gj + M[2, 2] * gk + M[2, 3]
-
-        del gi, gj, gk
-
-        coords = np.array([si, sj, sk])
-        del si, sj, sk
-
-        slab = map_coordinates(source_data, coords, order=order,
-                               mode='constant', cval=cval)
-        del coords
-
-        if round_int:
-            np.round(slab, out=slab)
-        out[i_start:i_end] = slab.astype(target_dtype)
-        del slab
-
-    return out
+    if round_int:
+        np.round(out, out=out)
+    return out.astype(target_dtype)
 
 
 # ---------------------------------------------------------------------------
