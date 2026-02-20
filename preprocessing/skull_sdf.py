@@ -13,7 +13,9 @@ import sys
 
 import nibabel as nib
 import numpy as np
-from scipy.ndimage import binary_dilation, binary_erosion, distance_transform_edt
+from scipy.ndimage import (
+    binary_dilation, binary_erosion, distance_transform_edt, gaussian_filter,
+)
 
 from preprocessing.utils import (
     PROFILES,
@@ -52,13 +54,8 @@ def parse_args(argv=None):
         help="Morphological closing radius in mm (default: 10.0)",
     )
     parser.add_argument(
-        # 0.5mm matches the physiological subarachnoid space thickness over
-        # convexities in young adults (~1-2mm, but ceil to 1 source voxel at
-        # 0.7mm).  At coarse simulation grids (dev 1.0mm, debug 2.0mm) the
-        # resulting shell may be sub-voxel and not resolve as a continuous CSF
-        # layer in the material map.  This is a grid resolution limitation,
-        # not a reason to inflate the skull boundary — the SDF should represent
-        # the true anatomy regardless of simulation grid.
+        # Conservative initial dilation; refined by T2w calibration when
+        # T2w_acpc_dc_restore.nii.gz is available.
         "--dilate-radius", type=float, default=0.5,
         help="Outward dilation radius in mm (default: 0.5)",
     )
@@ -100,6 +97,20 @@ def load_source_masks(raw):
     head_mask = head_img.get_fdata() > 0.5
 
     return brain_mask, head_mask, source_affine
+
+
+def load_t2w(raw):
+    """Load T2w volume from the raw subject directory.
+
+    Returns the float32 data array, or None if the file doesn't exist.
+    """
+    t2w_path = raw / "T2w_acpc_dc_restore.nii.gz"
+    if not t2w_path.exists():
+        print(f"WARNING: T2w not found at {t2w_path}, skipping T2w calibration")
+        return None
+    print(f"Loading {t2w_path}")
+    t2w_img = nib.load(str(t2w_path))
+    return t2w_img.get_fdata(dtype=np.float32)
 
 
 def extract_voxel_size(source_affine):
@@ -193,8 +204,117 @@ def compute_signed_edt(skull_interior, voxel_size):
     sdf = dt_outside.astype(np.float32)
     del dt_outside
 
+    # Light Gaussian smooth to remove sub-voxel bumps from gyral crowns
+    # poking through the morphological closing.  sigma=1mm is small enough
+    # to preserve anatomy but removes outlier jumps (P95 1.3mm → ~0.7mm).
+    sigma_vox = 1.0 / voxel_size
+    print(f"Smoothing SDF: sigma=1.0 mm ({sigma_vox:.1f} voxels)")
+    sdf = gaussian_filter(sdf, sigma=sigma_vox).astype(np.float32)
+
     print(f"SDF range: [{sdf.min():.1f}, {sdf.max():.1f}] mm")
     return sdf
+
+
+def _t2w_shell_profile(sdf, t2w, roi):
+    """Compute median T2w in SDF shells and find the inner table crossing.
+
+    Returns dict with keys: shift, csf_peak_sdf, csf_peak_val,
+    inner_table_sdf, midpoint_val, bone_trough_sdf, bone_trough_val.
+    Returns None if the profile is too noisy or sparse.
+    """
+    shell_step = 0.3  # mm
+    sdf_lo, sdf_hi = -5.0, 15.0
+    edges = np.arange(sdf_lo, sdf_hi + shell_step, shell_step)
+    centers = (edges[:-1] + edges[1:]) / 2
+    median_t2w = np.full(len(centers), np.nan)
+
+    for i in range(len(centers)):
+        mask = roi & (sdf >= edges[i]) & (sdf < edges[i + 1])
+        n = mask.sum()
+        if n > 0:
+            median_t2w[i] = np.median(t2w[mask])
+
+    valid = ~np.isnan(median_t2w)
+    if valid.sum() < 5:
+        return None
+
+    median_t2w[~valid] = np.interp(
+        centers[~valid], centers[valid], median_t2w[valid]
+    )
+
+    # CSF peak: max T2w in SDF range -4 to +4mm
+    csf_range = (centers >= -4.0) & (centers <= 4.0)
+    csf_idx = np.where(csf_range)[0][np.argmax(median_t2w[csf_range])]
+    csf_peak_sdf = centers[csf_idx]
+    csf_peak_val = median_t2w[csf_idx]
+
+    # Bone trough: min T2w beyond CSF peak
+    beyond_csf = np.where(centers > csf_peak_sdf)[0]
+    if len(beyond_csf) < 3:
+        return None
+    bone_idx = beyond_csf[np.argmin(median_t2w[beyond_csf])]
+    bone_trough_sdf = centers[bone_idx]
+    bone_trough_val = median_t2w[bone_idx]
+
+    # Inner table: midpoint crossing with linear interpolation
+    midpoint_val = (csf_peak_val + bone_trough_val) / 2.0
+    transition = np.where(
+        (centers >= csf_peak_sdf) & (centers <= bone_trough_sdf)
+    )[0]
+    if len(transition) < 2:
+        return None
+
+    trans_vals = median_t2w[transition]
+    cross_idx = np.where(trans_vals <= midpoint_val)[0]
+    if len(cross_idx) == 0:
+        inner_table_sdf = bone_trough_sdf
+    else:
+        ci = cross_idx[0]
+        if ci > 0:
+            s0 = centers[transition[ci - 1]]
+            s1 = centers[transition[ci]]
+            v0 = trans_vals[ci - 1]
+            v1 = trans_vals[ci]
+            frac = (midpoint_val - v0) / (v1 - v0) if v1 != v0 else 0.5
+            inner_table_sdf = s0 + frac * (s1 - s0)
+        else:
+            inner_table_sdf = centers[transition[ci]]
+
+    return {
+        "shift": inner_table_sdf,
+        "csf_peak_sdf": csf_peak_sdf,
+        "csf_peak_val": csf_peak_val,
+        "inner_table_sdf": inner_table_sdf,
+        "midpoint_val": midpoint_val,
+        "bone_trough_sdf": bone_trough_sdf,
+        "bone_trough_val": bone_trough_val,
+    }
+
+
+def _print_t2w_landmarks(label, result):
+    """Print T2w calibration landmarks."""
+    print(f"{label}:")
+    print(f"  CSF peak:    SDF = {result['csf_peak_sdf']:+.1f} mm  "
+          f"(T2w = {result['csf_peak_val']:.0f})")
+    print(f"  Inner table: SDF = {result['inner_table_sdf']:+.1f} mm  "
+          f"(T2w midpoint = {result['midpoint_val']:.0f})")
+    print(f"  Bone trough: SDF = {result['bone_trough_sdf']:+.1f} mm  "
+          f"(T2w = {result['bone_trough_val']:.0f})")
+    print(f"  Shift: {result['shift']:+.2f} mm")
+
+
+def calibrate_sdf_with_t2w(sdf, t2w, brain_mask, head_mask, voxel_size):
+    """Compute a global SDF shift using T2w CSF→bone transition.
+
+    Returns the shift in mm (subtract from SDF to align inner table to 0).
+    """
+    roi = ~brain_mask & head_mask
+    result = _t2w_shell_profile(sdf, t2w, roi)
+    if result is None:
+        print("WARNING: T2w global profile failed, skipping calibration")
+        return 0.0
+    _print_t2w_landmarks("T2w calibration", result)
+    return result["shift"]
 
 
 def save_skull_sdf(out_dir, sdf, grid_affine):
@@ -209,7 +329,8 @@ def save_skull_sdf(out_dir, sdf, grid_affine):
 # ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------
-def print_validation(sdf_sim, args, grid_affine, out_dir, r_dilate):
+def print_validation(sdf_sim, args, grid_affine, out_dir, r_dilate,
+                     t2w_shift=0.0):
     """Run validation checks on the final SDF.
 
     Returns True if all critical checks pass, False otherwise.
@@ -284,6 +405,13 @@ def print_validation(sdf_sim, args, grid_affine, out_dir, r_dilate):
     else:
         print(f"   No voxels within {shell_thickness} mm of SDF = 0 surface")
 
+    # 6. T2w-calibrated SDF shift
+    print(f"\n6. T2w-calibrated SDF shift:")
+    if t2w_shift != 0.0:
+        print(f"   Applied shift: {t2w_shift:+.2f} mm")
+    else:
+        print(f"   No T2w calibration applied (shift = 0)")
+
     if failed:
         print(f"\nCRITICAL: validation failed (see FAIL above)")
         sys.exit(1)
@@ -315,7 +443,9 @@ def main(argv=None):
 
     print(f"r_close_vox={r_close_vox}, r_dilate_vox={r_dilate_vox}, pad_z={pad_z}")
 
-    # 3. Inferior padding
+    # 3. Inferior padding (keep unpadded refs for T2w calibration)
+    brain_mask_unpadded = brain_mask
+    head_mask_unpadded = head_mask
     brain_mask, head_mask, A_padded = pad_inferior(
         brain_mask, head_mask, source_affine, pad_z, voxel_size
     )
@@ -343,6 +473,23 @@ def main(argv=None):
     del skull_interior
     print()
 
+    # 7b. T2w-calibrated SDF shift
+    t2w = load_t2w(raw)
+    if t2w is not None:
+        # Calibrate on the unpadded region: sdf_source[:, :, pad_z:]
+        # aligns with the original source arrays (T2w, brain_mask, head_mask).
+        sdf_unpadded = sdf_source[:, :, pad_z:]
+        t2w_shift = calibrate_sdf_with_t2w(
+            sdf_unpadded, t2w, brain_mask_unpadded, head_mask_unpadded,
+            voxel_size,
+        )
+        del sdf_unpadded
+        sdf_source -= t2w_shift
+    else:
+        t2w_shift = 0.0
+    del t2w, brain_mask_unpadded, head_mask_unpadded
+    print()
+
     # 8. Load grid meta and resample to simulation grid
     out_dir = processed_dir(args.subject, args.profile)
     grid_affine, N_meta = load_grid_meta(out_dir)
@@ -363,7 +510,8 @@ def main(argv=None):
     save_skull_sdf(out_dir, sdf_sim, grid_affine)
 
     # 10. Validation
-    print_validation(sdf_sim, args, grid_affine, out_dir, args.dilate_radius)
+    print_validation(sdf_sim, args, grid_affine, out_dir, args.dilate_radius,
+                     t2w_shift)
 
 
 if __name__ == "__main__":

@@ -736,6 +736,60 @@ def check_c7(ctx):
                    value=f"{tent_bridging} bridging components")
 
 
+@check("C8", severity="WARN", phase="dural", needs={"mat"})
+def check_c8(ctx):
+    """Dural membrane surface area (falx ~56.5 cm², tentorium ~60 cm²)."""
+    mat = ctx.mat
+    N = ctx.N
+    dx = ctx.dx
+    mid_x = N // 2
+
+    dural = (mat == 10)
+    n_dural = int(np.count_nonzero(dural))
+    if n_dural == 0:
+        ctx.record("C8", True, value="skipped (0 dural voxels)")
+        return
+
+    face_area_cm2 = dx ** 2 / 100.0  # mm² → cm²
+
+    def _one_sided_area(mask):
+        """Boundary-face count / 2 → one-sided membrane area in cm²."""
+        n_faces = 0
+        for ax in range(3):
+            sl_a = [slice(None)] * 3
+            sl_b = [slice(None)] * 3
+            sl_a[ax] = slice(None, -1)
+            sl_b[ax] = slice(1, None)
+            n_faces += int(np.count_nonzero(
+                mask[tuple(sl_a)] != mask[tuple(sl_b)]
+            ))
+        return n_faces * face_area_cm2 / 2.0
+
+    # Falx: dural voxels near midline (same slab as C2)
+    falx = dural.copy()
+    falx[:mid_x - 5, :, :] = False
+    falx[mid_x + 5:, :, :] = False
+
+    # Tentorium: remainder
+    tent = dural & ~falx
+
+    falx_cm2 = _one_sided_area(falx)
+    tent_cm2 = _one_sided_area(tent)
+    del falx, tent
+
+    # Anatomical references (Staquet et al. 2020, n=40 CT):
+    #   Falx: 56.5 ± 7.7 cm², ±2 SD (95% population) → [41, 72]
+    #   Tentorium: 57.6 ± 5.8 cm², ±2 SD (95% population) → [46, 69]
+    falx_ok = 41.0 <= falx_cm2 <= 72.0
+    tent_ok = 46.0 <= tent_cm2 <= 69.0
+
+    ctx.metrics["falx_area_cm2"] = round(falx_cm2, 1)
+    ctx.metrics["tentorium_area_cm2"] = round(tent_cm2, 1)
+
+    ctx.record("C8", falx_ok and tent_ok,
+               value=f"falx={falx_cm2:.1f} cm² [41–72], tent={tent_cm2:.1f} cm² [46–69]")
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Phase 4: Fiber Texture (F1–F6)
 # ═══════════════════════════════════════════════════════════════════════════
