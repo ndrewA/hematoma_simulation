@@ -105,10 +105,6 @@ def process_input(window, state):
     if pressed('h'):
         state.show_ui = not state.show_ui
 
-    # --- Screenshot ---
-    if pressed('p'):
-        state._save_screenshot = True
-
     _prev_keys = curr_keys
     return True
 

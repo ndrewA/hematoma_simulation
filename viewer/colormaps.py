@@ -60,6 +60,15 @@ def build_grayscale_lut():
     return lut
 
 
+def build_highlight_lut(r, g, b):
+    """Build a 256-entry LUT where 0=transparent, 1=(r,g,b,1)."""
+    lut = ti.Vector.field(4, dtype=ti.f32, shape=(N_CATEGORIES,))
+    arr = np.zeros((N_CATEGORIES, 4), dtype=np.float32)
+    arr[1] = (r, g, b, 1.0)
+    lut.from_numpy(arr)
+    return lut
+
+
 def build_diverging_lut():
     """Build a 256-entry blue-white-red diverging LUT for SDF."""
     lut = ti.Vector.field(4, dtype=ti.f32, shape=(256,))

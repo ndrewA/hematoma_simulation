@@ -90,6 +90,31 @@ def generate_all_figures(ctx, which=None):
             except Exception as e:
                 print(f"  WARNING: Figure 4 failed: {e}")
 
+    if which is None or 5 in which:
+        if ctx.has_simnibs:
+            print("  Generating Figure 5...")
+            try:
+                from preprocessing.validation.checks import _load_simnibs_resampled
+                sim = ctx.get_cached("simnibs_resampled",
+                                     lambda: _load_simnibs_resampled(ctx))
+                generate_fig5(ctx.sdf, sim["sdf"], sim["labels"],
+                              sim["inner_boundary"], t1w, N,
+                              ctx.subject, ctx.profile, ctx.dx,
+                              paths["fig5"])
+            except Exception as e:
+                print(f"  WARNING: Figure 5 failed: {e}")
+
+    if which is None or 6 in which:
+        if ctx.has_simnibs and "gt_verts_ours" in ctx._cache:
+            print("  Generating Figure 6...")
+            try:
+                generate_fig6(
+                    ctx._cache["gt_verts_ours"], ctx._cache["gt_verts_sim"],
+                    ctx._cache["gt_d_o2s"], ctx._cache["gt_d_s2o"],
+                    ctx.subject, ctx.profile, paths["fig6"])
+            except Exception as e:
+                print(f"  WARNING: Figure 6 failed: {e}")
+
     del t1w
 
 
@@ -449,3 +474,202 @@ def _compute_dec_slice(tensor_slice):
         rgb[i, nz_cols] = abs_principal * brightness[:, np.newaxis]
 
     return np.clip(rgb, 0, 1)
+
+
+# ---------------------------------------------------------------------------
+# Figure 5: Skull SDF vs SimNIBS Ground Truth
+# ---------------------------------------------------------------------------
+
+def generate_fig5(our_sdf, simnibs_sdf, labels_sim, inner_boundary,
+                  t1w, N, subject, profile, dx, path):
+    """SDF contour comparison + error histogram vs SimNIBS ground truth."""
+    from matplotlib.colors import TwoSlopeNorm
+
+    mid = N // 2
+
+    # SDF values at SimNIBS boundary
+    sdf_at_boundary = our_sdf[inner_boundary]
+    mae = float(np.mean(np.abs(sdf_at_boundary)))
+    med = float(np.median(sdf_at_boundary))
+
+    fig = plt.figure(figsize=(16, 14))
+    fig.suptitle(
+        f"Skull SDF vs SimNIBS Ground Truth \u2014 {subject} / {profile} "
+        f"({N}\u00b3, {dx} mm)",
+        fontsize=14, fontweight="bold",
+    )
+    gs = fig.add_gridspec(3, 3, hspace=0.3, wspace=0.25)
+
+    # Row 1: Triplanar with both contours
+    slice_specs = [
+        ("Axial (z)", our_sdf[mid, :, :], simnibs_sdf[mid, :, :],
+         t1w[mid, :, :] if t1w is not None else None),
+        ("Coronal (y)", our_sdf[:, mid, :], simnibs_sdf[:, mid, :],
+         t1w[:, mid, :] if t1w is not None else None),
+        ("Sagittal (x)", our_sdf[:, :, mid], simnibs_sdf[:, :, mid],
+         t1w[:, :, mid] if t1w is not None else None),
+    ]
+
+    for col, (title, our_slc, sim_slc, t1w_slc) in enumerate(slice_specs):
+        ax = fig.add_subplot(gs[0, col])
+        if t1w_slc is not None:
+            ax.imshow(t1w_slc.T, origin="lower", cmap="gray",
+                      interpolation="nearest")
+        ax.contour(our_slc.T, levels=[0], colors=["#00FF00"],
+                   linewidths=[2.0])
+        ax.contour(sim_slc.T, levels=[0], colors=["#FF0000"],
+                   linewidths=[2.0], linestyles="dashed")
+        ax.set_title(title, fontsize=10)
+        ax.axis("off")
+
+    # Row 2: SDF difference in near-boundary shell
+    diff_vol = our_sdf - simnibs_sdf
+    norm = TwoSlopeNorm(vmin=-5, vcenter=0, vmax=5)
+    row2_specs = [
+        ("Sagittal", diff_vol[mid, :, :], simnibs_sdf[mid, :, :],
+         t1w[mid, :, :] if t1w is not None else None),
+        ("Coronal", diff_vol[:, mid, :], simnibs_sdf[:, mid, :],
+         t1w[:, mid, :] if t1w is not None else None),
+        ("Axial", diff_vol[:, :, mid], simnibs_sdf[:, :, mid],
+         t1w[:, :, mid] if t1w is not None else None),
+    ]
+
+    for col, (title, diff_slc, sim_slc, t1w_slc) in enumerate(row2_specs):
+        ax = fig.add_subplot(gs[1, col])
+        if t1w_slc is not None:
+            ax.imshow(t1w_slc.T, origin="lower", cmap="gray",
+                      interpolation="nearest", alpha=0.5)
+        near_boundary = np.abs(sim_slc) < 3.0
+        diff_masked = np.where(near_boundary, diff_slc, np.nan)
+        im = ax.imshow(diff_masked.T, origin="lower", cmap="RdBu_r",
+                       norm=norm, interpolation="nearest")
+        plt.colorbar(im, ax=ax, shrink=0.7, label="SDF diff (mm)")
+        ax.set_title(f"{title} \u2014 SDF difference", fontsize=10)
+        ax.axis("off")
+    del diff_vol
+
+    # Row 3: Histogram + stats
+    ax_hist = fig.add_subplot(gs[2, 0:2])
+    bins = np.arange(-8, 8.25, 0.25)
+    ax_hist.hist(sdf_at_boundary, bins=bins, alpha=0.7, color="#2196F3",
+                 edgecolor="white", linewidth=0.3,
+                 label="Our SDF at SimNIBS boundary")
+    ax_hist.axvline(0, color="black", linewidth=1.5, linestyle="--",
+                    label="Ideal (0 mm)")
+    ax_hist.axvline(med, color="#FF5722", linewidth=2,
+                    label=f"Median: {med:+.2f} mm")
+    ax_hist.set_xlabel("Signed distance error (mm)", fontsize=11)
+    ax_hist.set_ylabel("Voxel count", fontsize=11)
+    ax_hist.set_title("Error distribution at SimNIBS inner skull boundary",
+                      fontsize=11)
+    ax_hist.legend(fontsize=9)
+    ax_hist.set_xlim(-8, 8)
+
+    ax_stats = fig.add_subplot(gs[2, 2])
+    ax_stats.axis("off")
+    rmse = float(np.sqrt(np.mean(sdf_at_boundary ** 2)))
+    stats_text = (
+        f"Error at SimNIBS boundary\n"
+        f"{'=' * 28}\n"
+        f"N voxels:  {len(sdf_at_boundary):,}\n\n"
+        f"Median:    {med:+.2f} mm\n"
+        f"Mean:      {np.mean(sdf_at_boundary):+.2f} mm\n"
+        f"Std:       {np.std(sdf_at_boundary):.2f} mm\n"
+        f"MAE:       {mae:.2f} mm\n"
+        f"RMSE:      {rmse:.2f} mm\n\n"
+        f"P5:        {np.percentile(sdf_at_boundary, 5):+.2f} mm\n"
+        f"P25:       {np.percentile(sdf_at_boundary, 25):+.2f} mm\n"
+        f"P75:       {np.percentile(sdf_at_boundary, 75):+.2f} mm\n"
+        f"P95:       {np.percentile(sdf_at_boundary, 95):+.2f} mm\n\n"
+        f"Green = ours, Red = SimNIBS"
+    )
+    ax_stats.text(0.05, 0.95, stats_text, transform=ax_stats.transAxes,
+                  fontsize=9, fontfamily="monospace", verticalalignment="top",
+                  bbox=dict(boxstyle="round,pad=0.5", facecolor="lightyellow",
+                            edgecolor="gray"))
+
+    fig.savefig(str(path), dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved {path}")
+
+
+# ---------------------------------------------------------------------------
+# Figure 6: Surface Distance Spatial Error
+# ---------------------------------------------------------------------------
+
+def generate_fig6(verts_ours, verts_sim, d_o2s, d_s2o,
+                  subject, profile, path):
+    """Surface distance spatial error: scatter projections + histograms + CDF."""
+    fig, axes = plt.subplots(2, 3, figsize=(18, 11))
+    fig.suptitle(
+        f"Surface Distance: Our SDF=0 vs SimNIBS Inner Skull \u2014 "
+        f"{subject} / {profile}",
+        fontsize=14, fontweight="bold")
+
+    vmax = 8.0
+
+    # Row 1: scatter projections (ours -> simnibs)
+    projs = [
+        ("Axial (X vs Y)", 0, 1),
+        ("Coronal (X vs Z)", 0, 2),
+        ("Sagittal (Y vs Z)", 1, 2),
+    ]
+    for col, (title, ax_i, ax_j) in enumerate(projs):
+        ax = axes[0, col]
+        n = len(verts_ours)
+        step = max(1, n // 50000)
+        idx = np.arange(0, n, step)
+        sc = ax.scatter(verts_ours[idx, ax_i], verts_ours[idx, ax_j],
+                        c=d_o2s[idx], s=0.3, cmap="hot_r",
+                        vmin=0, vmax=vmax, rasterized=True)
+        ax.set_title(title)
+        ax.set_aspect("equal")
+        ax.set_xlabel("XYZ"[ax_i] + " (mm)")
+        ax.set_ylabel("XYZ"[ax_j] + " (mm)")
+        plt.colorbar(sc, ax=ax, label="Distance (mm)", shrink=0.8)
+
+    # Row 2: histograms + CDF
+    ax = axes[1, 0]
+    ax.hist(d_o2s, bins=100, range=(0, 15), color="#2196F3",
+            edgecolor="white", linewidth=0.3)
+    ax.axvline(np.mean(d_o2s), color="red", linewidth=2,
+               label=f"Mean: {np.mean(d_o2s):.2f}mm")
+    ax.axvline(np.median(d_o2s), color="orange", linewidth=2,
+               label=f"Median: {np.median(d_o2s):.2f}mm")
+    ax.set_xlabel("Ours\u2192SimNIBS distance (mm)")
+    ax.set_ylabel("Vertex count")
+    ax.set_title("Ours\u2192SimNIBS")
+    ax.legend(fontsize=9)
+
+    ax = axes[1, 1]
+    ax.hist(d_s2o, bins=100, range=(0, 15), color="#4CAF50",
+            edgecolor="white", linewidth=0.3)
+    ax.axvline(np.mean(d_s2o), color="red", linewidth=2,
+               label=f"Mean: {np.mean(d_s2o):.2f}mm")
+    ax.axvline(np.median(d_s2o), color="orange", linewidth=2,
+               label=f"Median: {np.median(d_s2o):.2f}mm")
+    ax.set_xlabel("SimNIBS\u2192Ours distance (mm)")
+    ax.set_ylabel("Vertex count")
+    ax.set_title("SimNIBS\u2192Ours")
+    ax.legend(fontsize=9)
+
+    ax = axes[1, 2]
+    thresholds = np.linspace(0, 15, 300)
+    cdf_o2s = [(d_o2s <= t).sum() / len(d_o2s) * 100 for t in thresholds]
+    cdf_s2o = [(d_s2o <= t).sum() / len(d_s2o) * 100 for t in thresholds]
+    ax.plot(thresholds, cdf_o2s, label="Ours\u2192SimNIBS", linewidth=2)
+    ax.plot(thresholds, cdf_s2o, label="SimNIBS\u2192Ours", linewidth=2)
+    ax.axhline(95, color="gray", linestyle="--", alpha=0.5)
+    ax.axhline(50, color="gray", linestyle="--", alpha=0.5)
+    ax.set_xlabel("Distance threshold (mm)")
+    ax.set_ylabel("% of surface within threshold")
+    ax.set_title("Cumulative Distribution")
+    ax.legend(fontsize=9)
+    ax.set_xlim(0, 15)
+    ax.set_ylim(0, 100)
+    ax.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    fig.savefig(str(path), dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved {path}")

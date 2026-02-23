@@ -25,8 +25,8 @@ Three standard profiles are defined:
 
 | Profile | $N$ | $\Delta x$ | Domain | Levels | Backend | Purpose |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **debug** | $256$ | $2.0\text{mm}$ | $512\text{mm}$ | $L_0 \dots L_5$ (6) | GPU (Vulkan) | Fast iteration, solver tuning |
-| **dev** | $512$ | $1.0\text{mm}$ | $512\text{mm}$ | $L_0 \dots L_6$ (7) | CPU | Anatomy validation, correctness |
+| **debug** | $128$ | $2.0\text{mm}$ | $256\text{mm}$ | $L_0 \dots L_4$ (5) | GPU (Vulkan) | Fast iteration, solver tuning |
+| **dev** | $256$ | $1.0\text{mm}$ | $256\text{mm}$ | $L_0 \dots L_5$ (6) | CPU | Anatomy validation, correctness |
 | **prod** | $512$ | $0.5\text{mm}$ | $256\text{mm}$ | $L_0 \dots L_6$ (7) | Cloud GPU | Full resolution results |
 
 The remainder of this specification uses the symbolic parameters $N$, $\Delta x$, and $D$ to describe all resolution-dependent quantities.

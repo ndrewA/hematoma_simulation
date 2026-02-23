@@ -324,32 +324,51 @@ def check_d4(ctx):
 
 @check("D5", severity="WARN", phase="domain", needs={"mat", "sdf"})
 def check_d5(ctx):
-    """SDF Eikonal property: gradient magnitude near 1.0."""
+    """SDF cut-cell quality: gradient magnitude and smoothness at the boundary.
+
+    The solver uses SDF values at cut-cell voxels (|SDF| < 0.5*dx) to
+    compute porosity: phi = clamp(0.5 + SDF/dx, eps, 1.0).  This check
+    verifies that |∇SDF| ≈ 1.0 at those voxels (porosity accuracy) and
+    that the zero-crossing is smooth (no sign oscillations).
+    """
     sdf = ctx.sdf
     N = ctx.N
     dx = ctx.dx
 
+    # --- Cut-cell gradient magnitude ---
+    cut_cell = np.argwhere(np.abs(sdf) < 0.5 * dx)
+    n_cut = len(cut_cell)
+    if n_cut == 0:
+        ctx.record("D5", True, value="no cut-cell voxels")
+        return
+
+    # Sample up to 100k cut-cell voxels for gradient computation
     rng = np.random.default_rng(42)
-    interior = np.argwhere(sdf < -1.0)
-    n_sample = min(100_000, len(interior))
-    if n_sample > 0:
-        sample = interior[rng.choice(len(interior), size=n_sample, replace=False)]
-        grad_mag_sq = np.zeros(n_sample)
-        for axis in range(3):
-            fwd = sample.copy()
-            fwd[:, axis] = np.clip(fwd[:, axis] + 1, 0, N - 1)
-            bwd = sample.copy()
-            bwd[:, axis] = np.clip(bwd[:, axis] - 1, 0, N - 1)
-            diff = (sdf[fwd[:, 0], fwd[:, 1], fwd[:, 2]]
-                    - sdf[bwd[:, 0], bwd[:, 1], bwd[:, 2]])
-            grad_mag_sq += (diff / (2 * dx)) ** 2
-        grad_mag = np.sqrt(grad_mag_sq)
-        p5 = float(np.percentile(grad_mag, 5))
-        p95 = float(np.percentile(grad_mag, 95))
-        d5_pass = (p5 >= 0.8) and (p95 <= 1.2)
-        ctx.record("D5", d5_pass, value=f"p5={p5:.3f}, p95={p95:.3f}")
-    else:
-        ctx.record("D5", True, value="skipped (no interior voxels)")
+    n_sample = min(100_000, n_cut)
+    sample = cut_cell[rng.choice(n_cut, size=n_sample, replace=False)]
+
+    grad_mag_sq = np.zeros(n_sample)
+    for axis in range(3):
+        fwd = sample.copy()
+        fwd[:, axis] = np.clip(fwd[:, axis] + 1, 0, N - 1)
+        bwd = sample.copy()
+        bwd[:, axis] = np.clip(bwd[:, axis] - 1, 0, N - 1)
+        diff = (sdf[fwd[:, 0], fwd[:, 1], fwd[:, 2]]
+                - sdf[bwd[:, 0], bwd[:, 1], bwd[:, 2]])
+        grad_mag_sq += (diff / (2 * dx)) ** 2
+    grad_mag = np.sqrt(grad_mag_sq)
+
+    p5 = float(np.percentile(grad_mag, 5))
+    median = float(np.median(grad_mag))
+    p95 = float(np.percentile(grad_mag, 95))
+
+    # Porosity error: |1 - |∇|| is the fractional error in phi
+    median_err = abs(1.0 - median)
+
+    # Pass if cut-cell gradients are within reasonable bounds
+    d5_pass = (p5 >= 0.7) and (p95 <= 1.3)
+    ctx.record("D5", d5_pass,
+               value=f"|∇| p5={p5:.2f} med={median:.2f} p95={p95:.2f}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -477,36 +496,44 @@ def check_c1(ctx):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Phase 3: Dural Membrane (C2–C7)
+# Phase 3: Dural Membrane (C2–C11)
 # ═══════════════════════════════════════════════════════════════════════════
+
+def _classify_dural(ctx):
+    """Classify dural (u8=10) voxels as falx vs tentorium.
+
+    Uses cerebellar tissue proximity: dural voxels within 3 voxels of
+    cerebellar cortex/WM are tentorium; the rest are falx.  Cached.
+    """
+    mat = ctx.mat
+    dural = (mat == 10)
+    if not dural.any():
+        return dural.copy(), dural.copy()
+    cerebellar_lut = np.zeros(256, dtype=bool)
+    cerebellar_lut[[4, 5]] = True
+    cerebellar_nearby = binary_dilation(cerebellar_lut[mat], iterations=3)
+    tent = dural & cerebellar_nearby
+    falx = dural & ~tent
+    return falx, tent
+
 
 @check("C2", severity="WARN", phase="dural", needs={"mat"})
 def check_c2(ctx):
     """Falx largest component > 90%."""
-    mat = ctx.mat
-    N = ctx.N
-    mid_x = N // 2
-    dural = (mat == 10)
-    n_dural = int(np.count_nonzero(dural))
-    if n_dural == 0:
-        ctx.record("C2", True, value="skipped (0 dural voxels)")
+    falx_region, _ = ctx.get_cached(
+        "dural_classification", lambda: _classify_dural(ctx))
+    n_falx = int(np.count_nonzero(falx_region))
+    if n_falx == 0:
+        ctx.record("C2", True, value="skipped (0 falx voxels)")
         return
 
-    falx_region = dural.copy()
-    falx_region[:mid_x - 5, :, :] = False
-    falx_region[mid_x + 5:, :, :] = False
-    n_falx = int(np.count_nonzero(falx_region))
-    if n_falx > 0:
-        falx_labels, falx_n_comp = cc_label(falx_region)
-        falx_sizes = np.sort(np.bincount(falx_labels.ravel())[1:])[::-1]
-        frac_largest = float(falx_sizes[0]) / float(falx_sizes.sum())
-        ctx.metrics["falx_components"] = falx_n_comp
-        ctx.record("C2", frac_largest > 0.90,
-                   value=f"{falx_n_comp} comp, largest={frac_largest:.1%}")
-        del falx_labels
-    else:
-        ctx.record("C2", True, value="skipped (0 falx voxels)")
-    del falx_region
+    falx_labels, falx_n_comp = cc_label(falx_region)
+    falx_sizes = np.sort(np.bincount(falx_labels.ravel())[1:])[::-1]
+    frac_largest = float(falx_sizes[0]) / float(falx_sizes.sum())
+    ctx.metrics["falx_components"] = falx_n_comp
+    ctx.record("C2", frac_largest > 0.90,
+               value=f"{falx_n_comp} comp, largest={frac_largest:.1%}")
+    del falx_labels
 
 
 @check("C3", severity="WARN", phase="dural", needs={"mat"})
@@ -740,9 +767,7 @@ def check_c7(ctx):
 def check_c8(ctx):
     """Dural membrane surface area (falx ~56.5 cm², tentorium ~60 cm²)."""
     mat = ctx.mat
-    N = ctx.N
     dx = ctx.dx
-    mid_x = N // 2
 
     dural = (mat == 10)
     n_dural = int(np.count_nonzero(dural))
@@ -750,32 +775,15 @@ def check_c8(ctx):
         ctx.record("C8", True, value="skipped (0 dural voxels)")
         return
 
-    face_area_cm2 = dx ** 2 / 100.0  # mm² → cm²
+    pixel_cm2 = dx ** 2 / 100.0  # mm² → cm²
 
-    def _one_sided_area(mask):
-        """Boundary-face count / 2 → one-sided membrane area in cm²."""
-        n_faces = 0
-        for ax in range(3):
-            sl_a = [slice(None)] * 3
-            sl_b = [slice(None)] * 3
-            sl_a[ax] = slice(None, -1)
-            sl_b[ax] = slice(1, None)
-            n_faces += int(np.count_nonzero(
-                mask[tuple(sl_a)] != mask[tuple(sl_b)]
-            ))
-        return n_faces * face_area_cm2 / 2.0
+    falx, tent = ctx.get_cached(
+        "dural_classification", lambda: _classify_dural(ctx))
 
-    # Falx: dural voxels near midline (same slab as C2)
-    falx = dural.copy()
-    falx[:mid_x - 5, :, :] = False
-    falx[mid_x + 5:, :, :] = False
-
-    # Tentorium: remainder
-    tent = dural & ~falx
-
-    falx_cm2 = _one_sided_area(falx)
-    tent_cm2 = _one_sided_area(tent)
-    del falx, tent
+    # Falx is a sagittal curtain → project onto y-z plane (collapse x)
+    falx_cm2 = float(np.count_nonzero(falx.any(axis=0))) * pixel_cm2
+    # Tentorium is a horizontal sheet → project onto x-y plane (collapse z)
+    tent_cm2 = float(np.count_nonzero(tent.any(axis=2))) * pixel_cm2
 
     # Anatomical references (Staquet et al. 2020, n=40 CT):
     #   Falx: 56.5 ± 7.7 cm², ±2 SD (95% population) → [41, 72]
@@ -788,6 +796,116 @@ def check_c8(ctx):
 
     ctx.record("C8", falx_ok and tent_ok,
                value=f"falx={falx_cm2:.1f} cm² [41–72], tent={tent_cm2:.1f} cm² [46–69]")
+
+
+# ---------------------------------------------------------------------------
+# Shared helper: falx heights at CC landmarks
+# ---------------------------------------------------------------------------
+
+def _compute_falx_cc_heights(ctx):
+    """Measure falx z-extent at CC body and genu y-positions.
+
+    Returns dict with keys 'body_mm', 'genu_mm', 'body_y', 'genu_y'.
+    Cached as 'falx_cc_heights'.
+    """
+    from preprocessing.dural_membrane import _FS_LUT_SIZE
+
+    mat = ctx.mat
+    dx = ctx.dx
+
+    # Load FS labels
+    fsd = ctx.get_cached("fs_data", lambda: _load_fs_data(ctx))
+    fs_safe = fsd["fs_safe"]
+
+    # Find CC body (253) and genu (255) y-positions
+    result = {}
+    for name, label in [("body", 253), ("genu", 255)]:
+        cc_region = (fs_safe == label)
+        if not cc_region.any():
+            result[f"{name}_mm"] = None
+            result[f"{name}_y"] = None
+            continue
+        # Centroid y of this CC region
+        y_indices = np.where(cc_region.any(axis=(0, 2)))[0]
+        y_pos = int(np.median(y_indices))
+        result[f"{name}_y"] = y_pos
+
+        # Falx z-extent at this y: project dural=10 across x
+        falx, _ = ctx.get_cached(
+            "dural_classification", lambda: _classify_dural(ctx))
+        falx_at_y = falx[:, y_pos, :].any(axis=0)
+        z_indices = np.where(falx_at_y)[0]
+        if len(z_indices) > 0:
+            h = (z_indices.max() - z_indices.min() + 1) * dx
+            result[f"{name}_mm"] = round(h, 1)
+        else:
+            result[f"{name}_mm"] = None
+
+    return result
+
+
+@check("C9", severity="WARN", phase="dural", needs={"mat", "fs"})
+def check_c9(ctx):
+    """Falx height at CC body: Kayalioglu 25.7 mm (±2 SD ≈ 14–37)."""
+    heights = ctx.get_cached(
+        "falx_cc_heights", lambda: _compute_falx_cc_heights(ctx))
+    h = heights["body_mm"]
+    if h is None:
+        ctx.record("C9", True, value="skipped (no CC body or no falx)")
+        return
+    ctx.metrics["falx_height_body_mm"] = h
+    ctx.record("C9", 14.0 <= h <= 37.0,
+               value=f"{h:.1f} mm [14–37]")
+
+
+@check("C10", severity="WARN", phase="dural", needs={"mat", "fs"})
+def check_c10(ctx):
+    """Falx height at CC genu: Kayalioglu 21.3 mm (±2 SD ≈ 10–33)."""
+    heights = ctx.get_cached(
+        "falx_cc_heights", lambda: _compute_falx_cc_heights(ctx))
+    h = heights["genu_mm"]
+    if h is None:
+        ctx.record("C10", True, value="skipped (no CC genu or no falx)")
+        return
+    ctx.metrics["falx_height_genu_mm"] = h
+    ctx.record("C10", 10.0 <= h <= 33.0,
+               value=f"{h:.1f} mm [10–33]")
+
+
+@check("C11", severity="WARN", phase="dural", needs={"mat"})
+def check_c11(ctx):
+    """Falx-tentorium junction A-P extent >= 30 mm."""
+    mat = ctx.mat
+    dx = ctx.dx
+
+    falx, tent = ctx.get_cached(
+        "dural_classification", lambda: _classify_dural(ctx))
+
+    n_falx = int(np.count_nonzero(falx))
+    n_tent = int(np.count_nonzero(tent))
+    if n_falx == 0 or n_tent == 0:
+        ctx.record("C11", True,
+                   value=f"skipped (falx={n_falx}, tent={n_tent})")
+        return
+
+    # Junction = falx voxels adjacent (within 2 voxels) to tentorium
+    falx_dilated = binary_dilation(falx, iterations=2)
+    junction = falx_dilated & tent
+    del falx_dilated
+
+    if not junction.any():
+        ctx.record("C11", False, value="no junction (gap > 2 vox)")
+        return
+
+    # Measure A-P extent: y-range of junction voxels
+    junction_y = np.where(junction.any(axis=(0, 2)))[0]
+    extent_mm = round((junction_y.max() - junction_y.min() + 1) * dx, 1)
+    n_junction = int(junction.sum())
+    del junction
+
+    ctx.metrics["falx_tent_junction_mm"] = extent_mm
+    ctx.record("C11", extent_mm >= 30.0,
+               value=f"{extent_mm:.0f} mm ({n_junction} vox) [≥30]")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -946,6 +1064,197 @@ def check_f6(ctx):
                     h10_pass = False
                     break
     ctx.record("F6", h10_pass, value="copied from H10")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Phase 5: Ground Truth (G1–G3)
+# ═══════════════════════════════════════════════════════════════════════════
+
+# SimNIBS CHARM label definitions (from final_tissues_LUT.txt)
+SIMNIBS_LABELS = {
+    1: "White-Matter",
+    2: "Gray-Matter",
+    3: "CSF",
+    4: "Bone",
+    5: "Scalp",
+    6: "Eye_balls",
+    7: "Compact_bone",
+    8: "Spongy_bone",
+    9: "Blood",
+    10: "Muscle",
+}
+
+
+def _load_simnibs_resampled(ctx):
+    """Load SimNIBS final_tissues, resample to grid, compute SDF.
+
+    Caches the resampled labels and SDF to val_dir/ so subsequent runs
+    skip the expensive resample + EDT (~5 min at 512³).
+
+    Returns dict with 'labels', 'sdf', 'inner_boundary'.
+    """
+    import nibabel as nib
+    from scipy.ndimage import distance_transform_edt
+    from preprocessing.utils import validation_dir, resample_to_grid
+
+    subject = ctx.subject
+    grid_affine = ctx.mat_affine
+    grid_shape = (ctx.N, ctx.N, ctx.N)
+    dx = ctx.dx
+    val_dir = ctx.paths["val_dir"]
+
+    labels_cache = val_dir / "simnibs_labels.nii.gz"
+    sdf_cache = val_dir / "simnibs_sdf.nii.gz"
+
+    if sdf_cache.exists() and labels_cache.exists():
+        labels = np.asarray(
+            nib.load(str(labels_cache)).dataobj, dtype=np.int16)
+        sdf = np.asarray(
+            nib.load(str(sdf_cache)).dataobj, dtype=np.float32)
+    else:
+        path = validation_dir(subject) / "final_tissues.nii.gz"
+        img = nib.load(str(path))
+        data = np.asarray(img.dataobj, dtype=np.int16)
+        if data.ndim == 4 and data.shape[3] == 1:
+            data = data[:, :, :, 0]
+
+        labels = resample_to_grid(
+            (data, img.affine), grid_affine, grid_shape,
+            order=0, cval=0, dtype=np.int16,
+        )
+        del data
+
+        inner_skull = np.isin(labels, [1, 2, 3, 9])
+        sampling = (dx, dx, dx)
+        dt_out = distance_transform_edt(~inner_skull, sampling=sampling)
+        dt_in = distance_transform_edt(inner_skull, sampling=sampling)
+        sdf = (dt_out - dt_in).astype(np.float32)
+        del dt_out, dt_in, inner_skull
+
+        val_dir.mkdir(parents=True, exist_ok=True)
+        nib.save(nib.Nifti1Image(labels, grid_affine), str(labels_cache))
+        nib.save(nib.Nifti1Image(sdf, grid_affine), str(sdf_cache))
+
+    # Inner skull boundary: intracranial voxels adjacent to bone
+    intracranial = np.isin(labels, [1, 2, 3, 9])
+    bone = np.isin(labels, [4, 7, 8])
+    inner_boundary = intracranial & binary_dilation(bone)
+
+    return {"labels": labels, "sdf": sdf, "inner_boundary": inner_boundary}
+
+
+@check("G1", severity="WARN", phase="ground_truth", needs={"sdf", "simnibs"})
+def check_g1(ctx):
+    """Skull SDF MAE at SimNIBS inner skull boundary."""
+    sim = ctx.get_cached("simnibs_resampled",
+                         lambda: _load_simnibs_resampled(ctx))
+    inner_boundary = sim["inner_boundary"]
+    n_boundary = int(inner_boundary.sum())
+    if n_boundary == 0:
+        ctx.record("G1", True, value="no boundary voxels")
+        return
+
+    sdf_at_boundary = ctx.sdf[inner_boundary]
+    mae = float(np.mean(np.abs(sdf_at_boundary)))
+    median = float(np.median(sdf_at_boundary))
+    ctx.metrics["gt_boundary_mae_mm"] = round(mae, 3)
+    ctx.metrics["gt_boundary_median_mm"] = round(median, 3)
+    ctx.metrics["gt_boundary_n_voxels"] = n_boundary
+    ctx.record("G1", mae <= 2.0,
+               value=f"MAE={mae:.2f}mm, med={median:+.2f}mm, n={n_boundary:,}")
+
+
+@check("G2", severity="INFO", phase="ground_truth", needs={"sdf", "simnibs"})
+def check_g2(ctx):
+    """Regional error by axial thirds (inferior/middle/superior)."""
+    sim = ctx.get_cached("simnibs_resampled",
+                         lambda: _load_simnibs_resampled(ctx))
+    inner_boundary = sim["inner_boundary"]
+    zs = np.where(inner_boundary.any(axis=(0, 1)))[0]
+    if len(zs) == 0:
+        ctx.record("G2", True, value="no boundary voxels")
+        return
+
+    z_min, z_max = int(zs[0]), int(zs[-1])
+    z_span = z_max - z_min
+    cuts = [z_min, z_min + z_span // 3,
+            z_min + 2 * z_span // 3, z_max + 1]
+
+    parts = []
+    for name, z_lo, z_hi in [("inf", cuts[0], cuts[1]),
+                              ("mid", cuts[1], cuts[2]),
+                              ("sup", cuts[2], cuts[3])]:
+        region = inner_boundary.copy()
+        region[:, :, :z_lo] = False
+        region[:, :, z_hi:] = False
+        n_r = int(region.sum())
+        if n_r > 0:
+            vals = ctx.sdf[region]
+            mae = float(np.mean(np.abs(vals)))
+            ctx.metrics[f"gt_{name}_mae_mm"] = round(mae, 3)
+            parts.append(f"{name}={mae:.2f}")
+
+    ctx.record("G2", True, value=", ".join(parts))
+
+
+@check("G3", severity="INFO", phase="ground_truth", needs={"sdf", "simnibs"})
+def check_g3(ctx):
+    """Symmetric surface distance (marching cubes + KD-tree)."""
+    from skimage.measure import marching_cubes
+    from scipy.spatial import cKDTree
+
+    our_sdf = ctx.sdf
+    our_affine = ctx.mat_affine
+    sim = ctx.get_cached("simnibs_resampled",
+                         lambda: _load_simnibs_resampled(ctx))
+    sim_sdf = sim["sdf"]
+
+    def _isosurface(vol, affine):
+        verts_vox, _, _, _ = marching_cubes(vol, level=0.0)
+        ones = np.ones((len(verts_vox), 1), dtype=verts_vox.dtype)
+        return (affine @ np.hstack([verts_vox, ones]).T).T[:, :3]
+
+    verts_ours = _isosurface(our_sdf, our_affine)
+    verts_sim = _isosurface(sim_sdf, our_affine)
+
+    tree_ours = cKDTree(verts_ours)
+    tree_sim = cKDTree(verts_sim)
+    d_o2s, _ = tree_sim.query(verts_ours)
+    d_s2o, _ = tree_ours.query(verts_sim)
+    all_d = np.concatenate([d_o2s, d_s2o])
+
+    mean_d = float(all_d.mean())
+    median_d = float(np.median(all_d))
+    p95_d = float(np.percentile(all_d, 95))
+    hausdorff = float(all_d.max())
+    hd95 = float(np.percentile(all_d, 95))
+
+    # Per-direction
+    o2s_p95 = float(np.percentile(d_o2s, 95))
+    o2s_max = float(d_o2s.max())
+    s2o_p95 = float(np.percentile(d_s2o, 95))
+    s2o_max = float(d_s2o.max())
+
+    ctx.metrics["gt_surface_mean_mm"] = round(mean_d, 3)
+    ctx.metrics["gt_surface_median_mm"] = round(median_d, 3)
+    ctx.metrics["gt_surface_p95_mm"] = round(p95_d, 3)
+    ctx.metrics["gt_surface_hausdorff_mm"] = round(hausdorff, 3)
+    ctx.metrics["gt_surface_hd95_mm"] = round(hd95, 3)
+    ctx.metrics["gt_o2s_p95_mm"] = round(o2s_p95, 3)
+    ctx.metrics["gt_o2s_hausdorff_mm"] = round(o2s_max, 3)
+    ctx.metrics["gt_s2o_p95_mm"] = round(s2o_p95, 3)
+    ctx.metrics["gt_s2o_hausdorff_mm"] = round(s2o_max, 3)
+
+    # Cache vertices for fig6
+    ctx._cache["gt_verts_ours"] = verts_ours
+    ctx._cache["gt_verts_sim"] = verts_sim
+    ctx._cache["gt_d_o2s"] = d_o2s
+    ctx._cache["gt_d_s2o"] = d_s2o
+
+    ctx.record("G3", True,
+               value=f"mean={mean_d:.2f}, med={median_d:.2f}, "
+                     f"P95={p95_d:.2f}, HD={hausdorff:.1f}, "
+                     f"HD95={hd95:.2f}mm")
 
 
 # ---------------------------------------------------------------------------

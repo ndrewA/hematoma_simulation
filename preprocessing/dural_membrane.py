@@ -16,12 +16,15 @@ from concurrent.futures import ThreadPoolExecutor
 import edt as _edt
 import nibabel as nib
 import numpy as np
+from scipy.interpolate import PchipInterpolator, interp1d
 from scipy.ndimage import (
     binary_dilation,
     binary_erosion,
+    binary_fill_holes,
     label as cc_label,
 )
-from scipy.spatial import ConvexHull, cKDTree
+from scipy.spatial import cKDTree
+from skimage.draw import line as draw_line
 
 from preprocessing.profiling import step
 from preprocessing.utils import PROFILES, build_ball, processed_dir, raw_dir
@@ -44,6 +47,25 @@ RIGHT_CEREBRAL_RANGE = (2001, 2035)
 CC_LABELS = frozenset({192, 251, 252, 253, 254, 255})
 
 _FS_LUT_SIZE = 2036  # matches material_map.LUT_SIZE
+
+# Kayalioglu falx height targets at CC landmarks (mm)
+_H_GENU = 21.3
+_H_BODY = 25.7
+_H_SPLENIUM = 45.6
+
+# FreeSurfer CC sub-region labels
+_CC_GENU = 255
+_CC_BODY = 253
+_CC_SPLENIUM = 251
+
+# Kayalioglu Type I ratios: falx_height / (falx_height + FC-CC gap)
+_RATIO_GENU = _H_GENU / (_H_GENU + 14.1)
+_RATIO_BODY = _H_BODY / (_H_BODY + 12.4)
+_RATIO_SPLENIUM = _H_SPLENIUM / (_H_SPLENIUM + 2.1)
+
+# Frassanito 2020 dimensionless ratios (3D CT reconstruction, n=40)
+_NOTCH_AREA_RATIO = 28.8 / 56.5
+_NOTCH_ASPECT_RATIO = 41.8 / 96.9
 
 
 def _build_fs_luts():
@@ -76,46 +98,18 @@ def _compute_crop_bbox(mat, pad_vox):
 # ---------------------------------------------------------------------------
 # Surface-map construction
 # ---------------------------------------------------------------------------
-def _sign_change_surface(phi, eligible):
-    """Extract zero-level-set of phi via sign-change detection.
+def _extract_membrane(phi, eligible, t_target_mm):
+    """Extract a dural membrane surface with target physical thickness.
 
-    Marks both voxels at every face where phi changes sign.
-    Guaranteed 6-separating by the digital Jordan-Brouwer theorem.
+    1. Finds the 1-voxel-thick sign-change surface (pick-closer) as a
+       barrier floor — guarantees every sign-change face has at least one
+       marked voxel, sufficient for the face-centered finite-volume solver.
+    2. Thickens by including all eligible voxels where |phi| < t_target_mm.
+       Since |phi| ≈ 2 × distance_from_midplane, this selects a slab of
+       approximately t_target_mm total thickness centred on the zero-level-set.
 
-    Parameters
-    ----------
-    phi : ndarray, 3-D float
-        Signed distance field (dist_A - dist_B).
-    eligible : ndarray, 3-D bool
-        Non-vacuum mask. Only eligible voxels are marked.
-
-    Returns
-    -------
-    surface : ndarray, 3-D bool
-        The membrane mask (2 voxels thick at each sign change).
-    """
-    positive = phi >= 0
-    surface = np.zeros(phi.shape, dtype=bool)
-    for ax in range(3):
-        lo = [slice(None)] * 3; hi = [slice(None)] * 3
-        lo[ax] = slice(None, -1); hi[ax] = slice(1, None)
-        flip = positive[tuple(lo)] != positive[tuple(hi)]
-        s1 = [slice(None)] * 3; s1[ax] = slice(None, -1)
-        s2 = [slice(None)] * 3; s2[ax] = slice(1, None)
-        surface[tuple(s1)] |= flip
-        surface[tuple(s2)] |= flip
-    return surface & eligible
-
-
-def _sign_change_surface_thin(phi, eligible):
-    """Extract 1-voxel-thick zero-level-set by picking the closer voxel.
-
-    For each sign-change face (where phi flips sign between two eligible
-    face-adjacent voxels), marks the voxel with smaller |phi| — i.e. the
-    one closer to the true zero-level-set.  This guarantees every
-    sign-change face has at least one marked voxel on its side, which is
-    sufficient for the face-centered finite-volume solver (7-point stencil,
-    harmonic-mean transmissibility).
+    At coarse grids the sign-change base dominates (1 voxel).  At fine grids
+    the |phi| threshold adds voxels, naturally approaching the target.
 
     Parameters
     ----------
@@ -123,12 +117,15 @@ def _sign_change_surface_thin(phi, eligible):
         Signed distance field (dist_A - dist_B).
     eligible : ndarray, 3-D bool
         Non-vacuum mask. Only eligible voxels are marked.
+    t_target_mm : float
+        Target membrane thickness in mm.
 
     Returns
     -------
     surface : ndarray, 3-D bool
-        The thinned membrane mask (1 voxel thick).
+        The membrane mask.
     """
+    # Base: 1-voxel sign-change surface (barrier guarantee)
     positive = phi >= 0
     abs_phi = np.abs(phi)
     surface = np.zeros(phi.shape, dtype=bool)
@@ -150,8 +147,39 @@ def _sign_change_surface_thin(phi, eligible):
         surface[tuple(s_lo)] |= lo_closer
         surface[tuple(s_hi)] |= hi_closer
 
+    # Thicken: include eligible voxels within t_target of the midplane
+    surface |= (abs_phi < t_target_mm) & eligible
+
     return surface
 
+
+
+def _get_edges(proj, Y, Z):
+    """Get top/bottom z for each y column of a 2D projection."""
+    top = np.full(Y, -1, dtype=int)
+    bot = np.full(Y, Z, dtype=int)
+    for y in range(Y):
+        zz = np.where(proj[y])[0]
+        if len(zz) > 0:
+            top[y] = zz.max()
+            bot[y] = zz.min()
+    exists = top >= 0
+    return top, bot, exists
+
+
+def _shoelace_area(ys, zs):
+    """Area of a closed polygon (shoelace formula)."""
+    ys = np.asarray(ys, dtype=float)
+    zs = np.asarray(zs, dtype=float)
+    return 0.5 * abs(np.dot(ys, np.roll(zs, -1)) - np.dot(zs, np.roll(ys, -1)))
+
+
+def _draw_line_safe(y0, z0, y1, z1, target, Y, Z):
+    """Draw a Bresenham line on a 2D grid with bounds clamping."""
+    y0, z0 = np.clip(y0, 0, Y - 1), np.clip(z0, 0, Z - 1)
+    y1, z1 = np.clip(y1, 0, Y - 1), np.clip(z1, 0, Z - 1)
+    rr, cc = draw_line(int(y0), int(z0), int(y1), int(z1))
+    target[rr, cc] = True
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +208,14 @@ def parse_args(argv=None):
         "--notch-radius", type=float, default=5.0,
         help="Tentorial notch exclusion radius in mm (default: 5.0)",
     )
+    parser.add_argument(
+        "--falx-thickness", type=float, default=1.0,
+        help="Falx cerebri target thickness in mm (default: 1.0)",
+    )
+    parser.add_argument(
+        "--tent-thickness", type=float, default=0.5,
+        help="Tentorium cerebelli target thickness in mm (default: 0.5)",
+    )
 
     args = parser.parse_args(argv)
 
@@ -201,12 +237,13 @@ def parse_args(argv=None):
 # I/O helpers
 # ---------------------------------------------------------------------------
 def load_inputs(out_dir):
-    """Load material map, FS labels, and grid metadata.
+    """Load material map, FS labels, skull SDF, and grid metadata.
 
-    Returns (mat, fs, affine, dx_mm).
+    Returns (mat, fs, skull_sdf, affine, dx_mm).
     """
     mat_path = out_dir / "material_map.nii.gz"
     fs_path = out_dir / "fs_labels_resampled.nii.gz"
+    skull_path = out_dir / "skull_sdf.nii.gz"
     meta_path = out_dir / "grid_meta.json"
 
     print(f"Loading {mat_path}")
@@ -218,6 +255,10 @@ def load_inputs(out_dir):
     fs_img = nib.load(str(fs_path))
     fs = np.asarray(fs_img.dataobj, dtype=np.int16)
 
+    print(f"Loading {skull_path}")
+    skull_img = nib.load(str(skull_path))
+    skull_sdf = np.asarray(skull_img.dataobj, dtype=np.float32)
+
     print(f"Loading {meta_path}")
     with open(meta_path) as f:
         meta = json.load(f)
@@ -227,7 +268,7 @@ def load_inputs(out_dir):
         f"Shape mismatch: mat={mat.shape}, fs={fs.shape}"
     )
 
-    return mat, fs, affine, dx_mm
+    return mat, fs, skull_sdf, affine, dx_mm
 
 
 def save_material_map(out_dir, mat, affine):
@@ -254,33 +295,14 @@ def classify_hemispheres(fs, left_lut, right_lut):
     return left_mask, right_mask
 
 
-def compute_cc_boundary(fs, N, cc_lut):
-    """Compute the superior z-index of the corpus callosum per coronal slice.
+def reconstruct_falx(mat, fs, skull_sdf, dx_mm, crop_slices,
+                     thickness_mm=1.0, tent_mask=None):
+    """Reconstruct the falx cerebri via PCHIP + Bezier free edge.
 
-    Returns cc_superior_z, int32 array of shape (N,).
-    -1 where no CC voxels exist in that coronal slice.
-    Uses pre-built LUT and vectorized max instead of per-slice loop.
-    """
-    fs_safe = np.clip(fs, 0, _FS_LUT_SIZE - 1)
-    cc_mask = cc_lut[fs_safe]
-
-    # any_x[y, z] = True if any CC voxel exists in column (*, y, z)
-    any_x = cc_mask.any(axis=0)  # shape (Y, Z)
-    Z = cc_mask.shape[2]
-    z_idx = np.arange(Z, dtype=np.int32)
-    # Where no CC, use -1; otherwise use z index
-    z_grid = np.where(any_x, z_idx[np.newaxis, :], -1)  # shape (Y, Z)
-    cc_superior_z = z_grid.max(axis=1).astype(np.int32)  # shape (Y,)
-
-    return cc_superior_z
-
-
-def reconstruct_falx(mat, fs, dx_mm, crop_slices):
-    """Reconstruct the falx cerebri via sign-change EDT watershed.
-
-    Computes signed distance field between left and right cerebral hemispheres
-    using EDT, then extracts the zero-level-set via sign-change detection.
-    Guaranteed 6-separating by the digital Jordan-Brouwer theorem.
+    Full phi=0 midplane membrane through all intracranial tissue,
+    shaped by a PCHIP-interpolated free edge with Bezier genu-crista
+    segment, using Kayalioglu ratios and Frassanito notch constraint.
+    Rasterized via flood fill.
 
     Returns falx_mask (boolean).
     """
@@ -288,10 +310,10 @@ def reconstruct_falx(mat, fs, dx_mm, crop_slices):
 
     # Crop to bounding box
     fs_crop = fs[crop_slices]
-    mat_crop = mat[crop_slices]
+    skull_crop = skull_sdf[crop_slices]
 
     # Classify hemispheres on crop
-    left_lut, right_lut, _ = _build_fs_luts()
+    left_lut, right_lut, cc_lut = _build_fs_luts()
     left_crop, right_crop = classify_hemispheres(fs_crop, left_lut, right_lut)
 
     # EDT pair on crop (threaded)
@@ -308,148 +330,359 @@ def reconstruct_falx(mat, fs, dx_mm, crop_slices):
     phi = dist_left - dist_right
     del dist_left, dist_right
 
-    # Supratentorial boundary: compute cerebral vs cerebellar EDT
-    # to clip falx to the supratentorial compartment.
-    cerebral_lut = np.zeros(256, dtype=bool)
-    cerebral_lut[[1, 2, 3, 9]] = True
-    cerebellar_lut = np.zeros(256, dtype=bool)
-    cerebellar_lut[[4, 5]] = True
-    cerebral_crop = cerebral_lut[mat_crop]
-    cerebellar_crop = cerebellar_lut[mat_crop]
+    # Full midplane membrane through all intracranial tissue
+    intracranial = skull_crop < 0
+    membrane = _extract_membrane(phi, intracranial, thickness_mm)
+    n_membrane = int(membrane.sum())
+    print(f"  Full midplane membrane: {n_membrane} voxels")
+    del phi, intracranial  # keep skull_crop for crista galli detection
 
-    supratentorial = np.ones(mat_crop.shape, dtype=bool)
-    if cerebellar_crop.any() and cerebral_crop.any():
-        print("  Computing supratentorial boundary (cerebral-cerebellar EDT)...")
-        with step("supratentorial boundary"):
-            with ThreadPoolExecutor(max_workers=2) as pool:
-                fut_c = pool.submit(_edt.edt, ~cerebral_crop, anisotropy=sampling, parallel=1)
-                fut_b = pool.submit(_edt.edt, ~cerebellar_crop, anisotropy=sampling, parallel=1)
-                dist_cerebral = fut_c.result()
-                dist_cerebellar = fut_b.result()
-            phi_tent = dist_cerebral - dist_cerebellar
-            supratentorial = (phi_tent <= 0)
-            del dist_cerebral, dist_cerebellar, phi_tent
-    del cerebral_crop, cerebellar_crop
+    X, Y, Z = membrane.shape
 
-    # Eligible: only CSF and cortical GM, supratentorial.
-    # The falx sits in the interhemispheric fissure — CSF between
-    # cortical surfaces. Restricting to CSF + cortex prevents the
-    # sign-change surface from leaking through deep midline tissue
-    # (thalamus, brainstem, choroid plexus, septum pellucidum).
-    eligible = ((mat_crop == 2) | (mat_crop == 8)) & supratentorial
-    del supratentorial
+    # CC landmark y-positions from FS sub-region labels
+    fs_safe = np.clip(fs_crop, 0, _FS_LUT_SIZE - 1)
+    cc_landmarks = {}
+    for name, label, height in [
+        ("splenium", _CC_SPLENIUM, _H_SPLENIUM),
+        ("body", _CC_BODY, _H_BODY),
+        ("genu", _CC_GENU, _H_GENU),
+    ]:
+        mask = (fs_safe == label)
+        if mask.any():
+            ys = np.where(mask.any(axis=(0, 2)))[0]
+            cc_landmarks[name] = (int(np.median(ys)), height)
 
-    # CC exclusion — dilate only in x-y (not superiorly in z) so the
-    # falx can still reach down to the CC surface from above.
-    _, _, cc_lut = _build_fs_luts()
-    fs_crop_safe = np.clip(fs_crop, 0, _FS_LUT_SIZE - 1)
-    cc_crop = cc_lut[fs_crop_safe]
-    struct_xy = np.ones((3, 3, 1), dtype=bool)
-    cc_buffer = binary_dilation(cc_crop, structure=struct_xy, iterations=2)
-    del cc_crop
-    eligible &= ~cc_buffer
-    del cc_buffer
+    # CC top/bottom edges for ratio-based control points
+    cc_proj = cc_lut[fs_safe].any(axis=0)
+    cc_top_z, _, cc_exists = _get_edges(cc_proj, Y, Z)
+    del fs_crop, fs_safe
 
-    # Deep midline exclusion: dilate ventricles, thalamus, choroid,
-    # and brainstem to cover adjacent unlabeled cistern CSF (FS=0)
-    # that would otherwise let the falx leak into deep structures.
-    _DEEP_MIDLINE_FS = frozenset({
-        4, 5, 43, 44,   # lateral ventricles
-        14, 15,          # 3rd and 4th ventricles
-        10, 49,          # thalamus
-        31, 63,          # choroid plexus
-        16,              # brainstem
-    })
-    deep_lut = np.zeros(_FS_LUT_SIZE, dtype=bool)
-    for lab in _DEEP_MIDLINE_FS:
-        deep_lut[lab] = True
-    deep_crop = deep_lut[fs_crop_safe]
-    deep_buffer = binary_dilation(deep_crop, iterations=3)
-    del deep_crop
-    eligible &= ~deep_buffer
-    del deep_buffer
+    # Membrane edges per y-column (projected onto y-z plane)
+    mem_yz = membrane.any(axis=0)
+    mem_top_z, mem_bot_z, mem_exists = _get_edges(mem_yz, Y, Z)
 
-    # Deep midline envelope exclusion: the falx lives in the
-    # interhemispheric fissure which wraps AROUND the CC from above.
-    # Everything INSIDE the envelope between the CC and the subcortical
-    # structures (ventricles, deep GM, brainstem, cerebellum) is deep
-    # midline — septum pellucidum, fornix, velum interpositum, internal
-    # cerebral veins — where the falx must never go.
-    #
-    # For each sagittal slice, compute the 2-D convex hull of the CC
-    # and deep-structure voxels in the (y, z) plane and exclude the
-    # interior.  This traces diagonal boundaries that follow the
-    # natural geometry between the two masses and catches FS=0 gaps
-    # that label-based dilation cannot reach.
-    cc_hull = cc_lut[fs_crop_safe]
-    deep_hull_lut = np.zeros(256, dtype=bool)
-    deep_hull_lut[[3, 4, 5, 6, 7]] = True  # deep GM, cerebellar WM/ctx, brainstem, vent CSF
-    deep_hull = deep_hull_lut[mat_crop]
+    # Tentorium top per y-column
+    tent_top_z = np.full(Y, -1, dtype=int)
+    tent_exists = np.zeros(Y, dtype=bool)
+    if tent_mask is not None:
+        tent_crop = tent_mask[crop_slices]
+        tent_yz = tent_crop.any(axis=0)
+        tent_top_z, _, tent_exists = _get_edges(tent_yz, Y, Z)
+        del tent_crop, tent_yz
 
-    X_crop, Y_crop, Z_crop = mat_crop.shape
-    hull_mask = np.zeros(mat_crop.shape, dtype=bool)
-    yy, zz = np.meshgrid(np.arange(Y_crop), np.arange(Z_crop), indexing="ij")
-    grid_yz = np.column_stack([yy.ravel(), zz.ravel()])
-    n_hull_slices = 0
+    mem_y_min = int(np.where(mem_exists)[0].min())
+    mem_y_max = int(np.where(mem_exists)[0].max())
 
-    for xi in range(X_crop):
-        if not cc_hull[xi].any() or not deep_hull[xi].any():
-            continue
-        combined_yz = np.argwhere(cc_hull[xi] | deep_hull[xi])
-        if len(combined_yz) < 3:
-            continue
-        try:
-            hull = ConvexHull(combined_yz)
-        except Exception:
-            continue
-        # Rasterise hull interior via half-plane intersection
-        inside = np.ones(len(grid_yz), dtype=bool)
-        for simplex in hull.equations:
-            inside &= (grid_yz @ simplex[:2] + simplex[2]) <= 0
-        hull_mask[xi] = inside.reshape(Y_crop, Z_crop)
-        n_hull_slices += 1
+    # Junction: where tent_top_z peaks (straight sinus)
+    junction_y = mem_y_min  # fallback if no tentorium
+    if tent_exists.any():
+        valid = tent_exists & mem_exists
+        if valid.any():
+            valid_y = np.where(valid)[0]
+            junction_y = int(valid_y[np.argmax(tent_top_z[valid_y])])
 
-    n_hull_excl = int(np.count_nonzero(eligible & hull_mask))
-    eligible &= ~hull_mask
-    print(f"  Deep midline envelope (convex hull): {n_hull_excl} eligible voxels "
-          f"removed ({n_hull_slices} sagittal slices)")
-    del cc_hull, deep_hull, hull_mask, grid_yz
+    splenium_y = cc_landmarks.get("splenium", (junction_y, 0))[0]
+    body_y = cc_landmarks.get("body", (splenium_y, 0))[0]
+    genu_y = cc_landmarks.get("genu", (body_y, 0))[0]
 
-    del fs_crop, fs_crop_safe
+    # Midline tentorium analysis for anchor point
+    mid_x = X // 2
+    tent_mid_top = np.full(Y, -1, dtype=int)
+    tent_mid_exists = np.zeros(Y, dtype=bool)
+    if tent_mask is not None:
+        tent_crop = tent_mask[crop_slices]
+        tent_mid = tent_crop[mid_x]
+        for y in range(Y):
+            zz = np.where(tent_mid[y])[0]
+            if len(zz) > 0:
+                tent_mid_top[y] = zz.max()
+                tent_mid_exists[y] = True
+        del tent_crop
 
-    # Cortex-proximity filter for CSF: only allow CSF near cortex
-    cortex_crop = (mat_crop == 2)
-    if cortex_crop.any():
-        dist_cortex = _edt.edt(
-            ~cortex_crop, anisotropy=sampling, parallel=1,
-        )
-        near_cortex = dist_cortex <= 10.0
-        del dist_cortex
-        # CSF far from cortex = deep cisterns, exclude from eligible
-        eligible &= near_cortex | (mat_crop != 8)
-        del near_cortex
-    del cortex_crop
+    tent_mid_ys = np.where(tent_mid_exists)[0]
+    if len(tent_mid_ys) > 0:
+        anchor_y = int(tent_mid_ys.max())
+        anchor_z = float(tent_mid_top[anchor_y])
+    else:
+        anchor_y = junction_y
+        anchor_z = (float(tent_top_z[junction_y]) if tent_exists[junction_y]
+                    else float(mem_bot_z[junction_y]))
+    print(f"  Anchor (midline tent end): y={anchor_y}, z={anchor_z:.0f}")
 
-    # Sign-change surface extraction
-    falx_crop = _sign_change_surface(phi, eligible)
-    del phi, eligible
+    # Crista galli detection: lowest skull floor anterior to genu
+    crista_y = None
+    crista_z = None
+    if len(cc_landmarks) >= 3:
+        skull_mid = skull_crop[mid_x]
+        skull_floor_z = np.full(Y, -1, dtype=int)
+        for y in range(genu_y, mem_y_max + 1):
+            if not mem_exists[y]:
+                continue
+            for z in range(0, Z):
+                if skull_mid[y, z] < 0:
+                    skull_floor_z[y] = z
+                    break
+        floor_valid = skull_floor_z > 0
+        search_end = mem_y_max - 5
+        best_floor = Z
+        for y in range(genu_y + 5, search_end + 1):
+            if not floor_valid[y]:
+                continue
+            mem_h = (mem_top_z[y] - mem_bot_z[y]) * dx_mm
+            if mem_h < 15:
+                continue
+            if skull_floor_z[y] < best_floor:
+                best_floor = skull_floor_z[y]
+                crista_y = y
+        if crista_y is not None:
+            crista_z = skull_floor_z[crista_y]
+            print(f"  Crista galli: y={crista_y}, z={crista_z}")
+        else:
+            crista_y = mem_y_max
+            crista_z = mem_bot_z[crista_y]
+            print(f"  Crista galli not found, using membrane tip y={crista_y}")
+    else:
+        crista_y = mem_y_max
+        crista_z = mem_bot_z[crista_y]
+        print(f"  Insufficient CC landmarks, using membrane tip y={crista_y}")
+    del skull_crop
 
-    n_csf = int((falx_crop & (mat_crop == 8)).sum())
-    n_tissue = int(falx_crop.sum()) - n_csf
-    print(f"  Falx sign-change: {int(falx_crop.sum())} voxels "
-          f"({n_csf} CSF, {n_tissue} tissue)")
+    # PCHIP control points: anchor → splenium → body → genu
+    ctrl_y = [float(anchor_y)]
+    ctrl_z = [anchor_z]
+    for name, ratio in [("splenium", _RATIO_SPLENIUM),
+                         ("body", _RATIO_BODY),
+                         ("genu", _RATIO_GENU)]:
+        if name in cc_landmarks:
+            y_cc, _ = cc_landmarks[name]
+            skull_top = mem_top_z[y_cc]
+            cc_top_val = (cc_top_z[y_cc] if cc_exists[y_cc]
+                          else mem_bot_z[y_cc])
+            z_val = skull_top - ratio * (skull_top - cc_top_val)
+            ctrl_y.append(float(y_cc))
+            ctrl_z.append(float(z_val))
 
-    # Keep only the largest connected component (discard tiny fragments)
-    labeled, n_comp = cc_label(falx_crop)
-    if n_comp > 1:
-        counts = np.bincount(labeled.ravel())[1:]
-        largest = int(counts.argmax()) + 1
-        n_removed = int(falx_crop.sum()) - int(counts.max())
-        falx_crop = (labeled == largest)
-        print(f"  Kept largest component ({int(counts.max())} voxels), "
-              f"removed {n_comp - 1} fragments ({n_removed} voxels)")
-    del labeled
-    del mat_crop
+    ctrl_y = np.array(ctrl_y)
+    ctrl_z = np.array(ctrl_z)
+    pchip = PchipInterpolator(ctrl_y, ctrl_z)
+    pchip_ys = np.arange(anchor_y, genu_y, dtype=float)
+    pchip_zs = pchip(pchip_ys)
+
+    # Outer boundary polyline (skull top + frontal wrap + skull bottom)
+    outer_ys = []
+    outer_zs = []
+    for y in range(anchor_y, mem_y_max + 1):
+        if mem_exists[y]:
+            outer_ys.append(float(y))
+            outer_zs.append(float(mem_top_z[y]))
+    outer_ys.append(float(mem_y_max))
+    outer_zs.append(float(mem_bot_z[mem_y_max]))
+    for y in range(mem_y_max - 1, crista_y - 1, -1):
+        if mem_exists[y]:
+            outer_ys.append(float(y))
+            outer_zs.append(float(mem_bot_z[y]))
+    outer_y = np.array(outer_ys)
+    outer_z = np.array(outer_zs)
+
+    # Posterior attached area (above tentorium, y < anchor)
+    posterior_area_vox2 = 0.0
+    for y in range(mem_y_min, anchor_y):
+        if mem_exists[y]:
+            top = mem_top_z[y]
+            bot = tent_top_z[y] if tent_exists[y] else mem_bot_z[y]
+            posterior_area_vox2 += max(0.0, float(top - bot))
+
+    # Similarity transform: map skull contour to free edge endpoints
+    skull_pts_y = []
+    skull_pts_z = []
+    for y in range(genu_y, mem_y_max + 1):
+        if mem_exists[y]:
+            skull_pts_y.append(float(y))
+            skull_pts_z.append(float(mem_top_z[y]))
+    skull_pts_y.append(float(mem_y_max))
+    skull_pts_z.append(float(mem_bot_z[mem_y_max]))
+    for y in range(mem_y_max - 1, crista_y - 1, -1):
+        if mem_exists[y]:
+            skull_pts_y.append(float(y))
+            skull_pts_z.append(float(mem_bot_z[y]))
+    skull_pts_y = np.array(skull_pts_y)
+    skull_pts_z = np.array(skull_pts_z)
+
+    genu_ctrl_z = float(ctrl_z[-1])
+    skull_start = np.array([skull_pts_y[0], skull_pts_z[0]])
+    skull_end = np.array([skull_pts_y[-1], skull_pts_z[-1]])
+    free_start = np.array([float(genu_y), genu_ctrl_z])
+    free_end = np.array([float(crista_y), float(crista_z)])
+
+    v_skull = skull_start - skull_end
+    v_free = free_start - free_end
+    sim_scale = np.linalg.norm(v_free) / np.linalg.norm(v_skull)
+    angle_skull = np.arctan2(v_skull[1], v_skull[0])
+    angle_free = np.arctan2(v_free[1], v_free[0])
+    dtheta = angle_free - angle_skull
+    cos_d, sin_d = np.cos(dtheta), np.sin(dtheta)
+
+    tx_y = np.zeros_like(skull_pts_y)
+    tx_z = np.zeros_like(skull_pts_z)
+    for i in range(len(skull_pts_y)):
+        dy = skull_pts_y[i] - skull_end[0]
+        dz = skull_pts_z[i] - skull_end[1]
+        tx_y[i] = free_end[0] + (cos_d * dy - sin_d * dz) * sim_scale
+        tx_z[i] = free_end[1] + (sin_d * dy + cos_d * dz) * sim_scale
+
+    # Arc-length parameterize for endpoint tangent extraction
+    skull_arc = np.zeros(len(tx_y))
+    for i in range(1, len(tx_y)):
+        skull_arc[i] = skull_arc[i - 1] + np.hypot(
+            tx_y[i] - tx_y[i - 1], tx_z[i] - tx_z[i - 1])
+    skull_t = skull_arc / skull_arc[-1]
+    skull_y_of_t = interp1d(skull_t, tx_y, kind="linear")
+    skull_z_of_t = interp1d(skull_t, tx_z, kind="linear")
+
+    eps = 1e-4
+    T0_y = float(skull_y_of_t(eps) - skull_y_of_t(0)) / eps
+    T0_z = float(skull_z_of_t(eps) - skull_z_of_t(0)) / eps
+    T1_y = float(skull_y_of_t(1) - skull_y_of_t(1 - eps)) / eps
+    T1_z = float(skull_z_of_t(1) - skull_z_of_t(1 - eps)) / eps
+    T0_len = np.hypot(T0_y, T0_z)
+    T0_dir = np.array([T0_y / T0_len, T0_z / T0_len])
+    T1_len = np.hypot(T1_y, T1_z)
+    T1_dir = np.array([T1_y / T1_len, T1_z / T1_len])
+
+    # Bezier alpha solve: match Frassanito notch area ratio
+    P0 = free_start
+    P3 = free_end
+    chord = np.linalg.norm(P3 - P0)
+
+    def _bezier_curve(alpha):
+        d = alpha * chord
+        p1 = P0 + d * T0_dir
+        p2 = P3 - d * T1_dir
+        t = np.linspace(0, 1, 300)
+        by = ((1 - t)**3 * P0[0] + 3 * (1 - t)**2 * t * p1[0]
+              + 3 * (1 - t) * t**2 * p2[0] + t**3 * P3[0])
+        bz = ((1 - t)**3 * P0[1] + 3 * (1 - t)**2 * t * p1[1]
+              + 3 * (1 - t) * t**2 * p2[1] + t**3 * P3[1])
+        return by, bz
+
+    def _notch_ratio(alpha):
+        by, bz = _bezier_curve(alpha)
+        iy = np.concatenate([pchip_ys, by])
+        iz = np.concatenate([pchip_zs, bz])
+        n_y = np.concatenate([iy, [float(anchor_y)]])
+        n_z = np.concatenate([iz, [anchor_z]])
+        notch = _shoelace_area(n_y, n_z)
+        f_y = np.concatenate([outer_y, iy[::-1]])
+        f_z = np.concatenate([outer_z, iz[::-1]])
+        falx_area = _shoelace_area(f_y, f_z) + posterior_area_vox2
+        return notch / falx_area if falx_area > 0 else 0
+
+    alphas = np.linspace(0.05, 0.8, 200)
+    ratios_sweep = np.array([_notch_ratio(a) for a in alphas])
+    idx = int(np.argmin(np.abs(ratios_sweep - _NOTCH_AREA_RATIO)))
+    alpha_solved = float(alphas[idx])
+    d_solved = alpha_solved * chord
+    P1 = P0 + d_solved * T0_dir
+    P2 = P3 - d_solved * T1_dir
+    print(f"  Bezier: \u03b1={alpha_solved:.3f}, d={d_solved * dx_mm:.1f}mm")
+
+    # Dense Bezier sampling (genu -> crista)
+    n_bez = 2000
+    t_bez = np.linspace(0, 1, n_bez)
+    bez_y = ((1 - t_bez)**3 * P0[0] + 3 * (1 - t_bez)**2 * t_bez * P1[0]
+             + 3 * (1 - t_bez) * t_bez**2 * P2[0] + t_bez**3 * P3[0])
+    bez_z = ((1 - t_bez)**3 * P0[1] + 3 * (1 - t_bez)**2 * t_bez * P1[1]
+             + 3 * (1 - t_bez) * t_bez**2 * P2[1] + t_bez**3 * P3[1])
+    inner_ys = np.concatenate([pchip_ys, bez_y])
+    inner_zs = np.concatenate([pchip_zs, bez_z])
+
+    # Flood fill rasterization
+    barrier = np.zeros((Y, Z), dtype=bool)
+
+    # 1. Free edge curve (PCHIP + Bezier)
+    for i in range(len(inner_ys) - 1):
+        _draw_line_safe(round(inner_ys[i]), round(inner_zs[i]),
+                        round(inner_ys[i + 1]), round(inner_zs[i + 1]),
+                        barrier, Y, Z)
+
+    # 2. Tentorium top (anchor backward to posterior extent)
+    tent_ys_arr = np.where(tent_exists)[0]
+    tent_post_y = int(tent_ys_arr.min()) if len(tent_ys_arr) > 0 else anchor_y
+    for y in range(anchor_y, tent_post_y, -1):
+        if tent_exists[y] and tent_exists[y - 1]:
+            _draw_line_safe(y, tent_top_z[y], y - 1, tent_top_z[y - 1],
+                            barrier, Y, Z)
+
+    # 3. Posterior close: tent end -> skull bottom backward -> vertical
+    _draw_line_safe(tent_post_y, tent_top_z[tent_post_y],
+                    tent_post_y, mem_bot_z[tent_post_y], barrier, Y, Z)
+    for y in range(tent_post_y, mem_y_min, -1):
+        if mem_exists[y] and mem_exists[y - 1]:
+            _draw_line_safe(y, mem_bot_z[y], y - 1, mem_bot_z[y - 1],
+                            barrier, Y, Z)
+    if mem_exists[mem_y_min]:
+        _draw_line_safe(mem_y_min, mem_bot_z[mem_y_min],
+                        mem_y_min, mem_top_z[mem_y_min], barrier, Y, Z)
+
+    # 4. Skull top (mem_y_min -> frontal pole)
+    for y in range(mem_y_min, mem_y_max):
+        if mem_exists[y] and mem_exists[y + 1]:
+            _draw_line_safe(y, mem_top_z[y], y + 1, mem_top_z[y + 1],
+                            barrier, Y, Z)
+
+    # 5. Frontal pole vertical drop
+    if mem_exists[mem_y_max]:
+        _draw_line_safe(mem_y_max, mem_top_z[mem_y_max],
+                        mem_y_max, mem_bot_z[mem_y_max], barrier, Y, Z)
+
+    # 6. Skull bottom (frontal pole back to crista)
+    for y in range(mem_y_max, crista_y, -1):
+        if mem_exists[y] and mem_exists[y - 1]:
+            _draw_line_safe(y, mem_bot_z[y], y - 1, mem_bot_z[y - 1],
+                            barrier, Y, Z)
+
+    # 7. Connect crista skull bottom -> free edge end
+    _draw_line_safe(crista_y, mem_bot_z[crista_y],
+                    int(round(inner_ys[-1])), int(round(inner_zs[-1])),
+                    barrier, Y, Z)
+
+    # Flood fill from midpoint at body CC
+    seed_y = body_y
+    seed_z = (int(float(pchip(float(body_y)))) + mem_top_z[body_y]) // 2
+    if barrier[seed_y, seed_z]:
+        for dz in range(1, 10):
+            if seed_z + dz < Z and not barrier[seed_y, seed_z + dz]:
+                seed_z = seed_z + dz
+                break
+
+    labeled, n_labels = cc_label(~barrier)
+    seed_label = labeled[seed_y, seed_z]
+    flood = labeled == seed_label
+    cookie = binary_fill_holes(flood | barrier)
+    del labeled, flood
+
+    # Intersect cookie with membrane
+    cookie_3d = np.broadcast_to(cookie[np.newaxis, :, :], (X, Y, Z))
+    falx_crop = membrane & cookie_3d
+    del membrane, cookie_3d, cookie
+
+    n_falx_crop = int(falx_crop.sum())
+    print(f"  After cookie-cut: {n_falx_crop} voxels "
+          f"(from {n_membrane} membrane)")
+
+    # Cut falx below the tentorium surface
+    if tent_mask is not None:
+        tent_crop = tent_mask[crop_slices]
+        tent_below = np.zeros((Y, Z), dtype=bool)
+        for y in range(Y):
+            if tent_exists[y]:
+                tent_below[y, :tent_top_z[y]] = True
+        tent_below_3d = np.broadcast_to(
+            tent_below[np.newaxis, :, :], (X, Y, Z))
+        n_below = int((falx_crop & tent_below_3d).sum())
+        falx_crop &= ~tent_below_3d
+        del tent_crop, tent_below, tent_below_3d
+        print(f"  Tentorium cut: removed {n_below} voxels below tent surface")
 
     # Write back to full grid
     falx_mask = np.zeros(mat.shape, dtype=bool)
@@ -457,17 +690,18 @@ def reconstruct_falx(mat, fs, dx_mm, crop_slices):
     del falx_crop
 
     n_falx = int(np.count_nonzero(falx_mask))
-    print(f"Falx cerebri: {n_falx} voxels (sign-change)")
+    print(f"Falx cerebri: {n_falx} voxels")
 
     return falx_mask
 
 
-def reconstruct_tentorium(mat, dx_mm, notch_radius, crop_slices):
+def reconstruct_tentorium(mat, dx_mm, notch_radius, crop_slices,
+                          thickness_mm=0.5):
     """Reconstruct the tentorium cerebelli via sign-change EDT watershed.
 
     Computes signed distance field between cerebral and cerebellar tissue
-    using EDT, then extracts the zero-level-set via sign-change detection.
-    Guaranteed 6-separating by the digital Jordan-Brouwer theorem.
+    using EDT, then extracts the zero-level-set via sign-change detection
+    with target physical thickness.
 
     Returns tent_mask (boolean).
     """
@@ -512,9 +746,8 @@ def reconstruct_tentorium(mat, dx_mm, notch_radius, crop_slices):
         del bs_xy, bs_dilated
     del brainstem_crop
 
-    # Sign-change surface extraction (1-voxel thick; sufficient for
-    # face-connected solver stencil, real tentorium is <1 mm)
-    tent_crop = _sign_change_surface_thin(phi, eligible)
+    # Membrane extraction with target thickness
+    tent_crop = _extract_membrane(phi, eligible, thickness_mm)
     del phi, eligible
 
     n_csf = int((tent_crop & (mat_crop == 8)).sum())
@@ -808,12 +1041,14 @@ def main(argv=None):
     print(f"Subject: {args.subject}")
     print(f"Profile: {args.profile}  (N={args.N}, dx={args.dx} mm)")
     print(f"Notch radius: {args.notch_radius} mm")
+    print(f"Falx thickness: {args.falx_thickness} mm")
+    print(f"Tentorium thickness: {args.tent_thickness} mm")
     print()
 
     out_dir = processed_dir(args.subject, args.profile)
 
     with step("load inputs"):
-        mat, fs, affine, dx_mm = load_inputs(out_dir)
+        mat, fs, skull_sdf, affine, dx_mm = load_inputs(out_dir)
 
     print(f"Shape: {mat.shape}  dtype: {mat.dtype}")
     print()
@@ -828,16 +1063,18 @@ def main(argv=None):
     print(f"EDT crop: {crop_shape} (pad={pad_vox} voxels)")
     print()
 
-    # Reconstruct falx cerebri (EDT watershed between hemispheres)
-    with step("reconstruct falx"):
-        falx_mask = reconstruct_falx(mat, fs, dx_mm, crop_slices)
-    del fs
-
-    # Reconstruct tentorium cerebelli
+    # Reconstruct tentorium cerebelli (needed by falx for posterior junction)
     with step("reconstruct tentorium"):
         tent_mask = reconstruct_tentorium(
             mat, dx_mm, args.notch_radius, crop_slices,
+            args.tent_thickness,
         )
+
+    # Reconstruct falx cerebri (midplane cookie-cutter with spline edge)
+    with step("reconstruct falx"):
+        falx_mask = reconstruct_falx(mat, fs, skull_sdf, dx_mm, crop_slices,
+                                     args.falx_thickness, tent_mask)
+    del fs, skull_sdf
 
     # Merge into material map
     n_falx, n_tent, n_overlap, n_total = merge_dural(mat, falx_mask, tent_mask)

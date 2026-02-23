@@ -1,8 +1,6 @@
 """Main application: window, render loop, dispatch."""
 
 import math
-from pathlib import Path
-
 import numpy as np
 import taichi as ti
 import taichi.math as tm
@@ -12,6 +10,7 @@ from viewer.data import ViewerData
 from viewer.layers import Layer, LayerType
 from viewer.colormaps import (
     build_categorical_lut, build_grayscale_lut, build_diverging_lut,
+    build_highlight_lut,
 )
 from viewer.kernels.composite import clear, fill_rect, draw_crosshair, draw_panel_border
 from viewer.kernels.slice_render import categorical_slice, scalar_slice
@@ -32,7 +31,7 @@ BUF_W, BUF_H = 2560, 1440
 LAYOUT_NAMES = {LayoutMode.SLICES: "Slices", LayoutMode.THREE_D: "3D"}
 
 
-def launch(subject_id, profile, capture=None):
+def launch(subject_id, profile):
     ti.init(arch=ti.vulkan)
 
     print(f"Loading {subject_id}/{profile}...")
@@ -44,6 +43,7 @@ def launch(subject_id, profile, capture=None):
     cat_lut = build_categorical_lut()
     gray_lut = build_grayscale_lut()
     div_lut = build_diverging_lut()
+    dura_lut = build_highlight_lut(1.0, 0.2, 0.2)  # red highlight for dura
 
     # Layers
     layers = [
@@ -56,6 +56,8 @@ def launch(subject_id, profile, capture=None):
               visible=False, opacity=1.0),
         Layer("Brain Mask", LayerType.CATEGORICAL, data.brain_mask,
               visible=False, opacity=0.3),
+        Layer("Dura", LayerType.CATEGORICAL, data.dura_mask,
+              visible=False, opacity=0.8),
     ]
 
     g2f_matrix = None
@@ -65,11 +67,12 @@ def launch(subject_id, profile, capture=None):
         fiber_affine_inv = np.linalg.inv(data.fiber_affine)
         g2f_matrix = (fiber_affine_inv @ data.grid_affine)[:3, :]
 
-    luts = [cat_lut, gray_lut, div_lut]
+    luts = [cat_lut, gray_lut, div_lut, dura_lut]
     layers[0].lut_index = 1  # T1w → grayscale
     layers[1].lut_index = 0  # material → categorical
     # layers[2] is CONTOUR — no LUT needed
     layers[3].lut_index = 0  # brain mask → categorical
+    layers[4].lut_index = 3  # dura → red highlight
 
     # Group opacity field for 3D voxel renderer
     group_opacity = ti.field(dtype=ti.f32, shape=(N_GROUPS,))
@@ -94,8 +97,8 @@ def launch(subject_id, profile, capture=None):
     print("Controls:")
     print("  Click slice: set crosshair   Drag 3D: orbit   WASD: orbit")
     print("  Up/Down: scroll slices       +/-: zoom         Tab: layout mode")
-    print("  1-5: toggle layers           Enter: fullscreen  H: toggle UI")
-    print("  P: screenshot                Esc: quit")
+    print("  1-6: toggle layers           Enter: fullscreen  H: toggle UI")
+    print("  H: toggle UI                 Esc: quit")
     print(f"  Layers: {', '.join(f'{i+1}={l.name}' for i, l in enumerate(layers))}")
 
     # Warmup: JIT-compile voxel_trace kernel before user interaction
@@ -111,9 +114,6 @@ def launch(subject_id, profile, capture=None):
         0.36, N,
     )
     print(" done")
-
-    if capture == "3d":
-        state.layout_mode = LayoutMode.THREE_D
 
     while window.running:
         win_w, win_h = window.get_window_shape()
@@ -197,24 +197,9 @@ def launch(subject_id, profile, capture=None):
 
         _draw_gui(window, state, layers)
 
-        if state._save_screenshot or capture is not None:
-            _save_frame(buf, win_w, win_h)
-            state._save_screenshot = False
-            if capture is not None:
-                break
-
         window.show()
 
     window.destroy()
-
-
-def _save_frame(buf, win_w, win_h):
-    from PIL import Image
-    arr = buf.to_numpy()[:win_w, :win_h]
-    arr = np.clip(arr * 255, 0, 255).astype(np.uint8)
-    arr = np.transpose(arr, (1, 0, 2))[::-1]
-    Image.fromarray(arr).save("viewer_screenshot.png")
-    print(f"Screenshot saved: {Path('viewer_screenshot.png').resolve()}")
 
 
 def _draw_panel_crosshair(state, panel_idx, buf):

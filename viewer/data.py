@@ -6,7 +6,6 @@ from pathlib import Path
 import nibabel as nib
 import numpy as np
 import taichi as ti
-from scipy.ndimage import distance_transform_edt
 
 # Reuse path helpers from preprocessing
 import sys
@@ -94,22 +93,19 @@ class ViewerData:
 
         # Skull SDF (float)
         self.skull_sdf = load_volume_f32(pdir / "skull_sdf.nii.gz")
-        sdf_np = self.skull_sdf.to_numpy()
-        self.sdf_vmin = float(sdf_np.min())
-        self.sdf_vmax = float(sdf_np.max())
 
-        # Brain mask (u8) and brain SDF (EDT-based)
+        # Brain mask (u8)
         self.brain_mask = load_volume_u8(pdir / "brain_mask.nii.gz")
-        brain_np = self.brain_mask.to_numpy().astype(bool)
-        outside = distance_transform_edt(~brain_np) * self.dx
-        inside = distance_transform_edt(brain_np) * self.dx
-        brain_sdf_np = (outside - inside).astype(np.float32)
-        self.brain_sdf = ti.field(dtype=ti.f32, shape=self.grid_shape)
-        self.brain_sdf.from_numpy(brain_sdf_np)
 
         # T1w (resampled)
         self.t1w, self.t1w_vmin, self.t1w_vmax = load_t1w(
             subject_id, self.grid_affine, self.grid_shape)
+
+        # Dura mask (label 10 from material map)
+        mat_np = self.material_map.to_numpy()
+        dura_np = (mat_np == 10).astype(np.uint8)
+        self.dura_mask = ti.field(dtype=ti.u8, shape=self.grid_shape)
+        self.dura_mask.from_numpy(dura_np)
 
         # Brain centroid for camera/crosshair centering
         centroid = self.meta.get('brain_centroid_grid')

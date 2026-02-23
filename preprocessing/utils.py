@@ -13,7 +13,7 @@ from scipy.ndimage import affine_transform
 # ---------------------------------------------------------------------------
 # Profile configs: name -> (N, dx_mm)
 # ---------------------------------------------------------------------------
-PROFILES = {"debug": (256, 2.0), "dev": (512, 1.0), "prod": (512, 0.5)}
+PROFILES = {"debug": (128, 2.0), "dev": (256, 1.0), "prod": (512, 0.5)}
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +125,11 @@ def processed_dir(subject_id, profile):
     return _PROJECT_ROOT / "data" / "processed" / subject_id / profile
 
 
+def validation_dir(subject_id):
+    """Return absolute path to validation ground-truth data for a subject."""
+    return _PROJECT_ROOT / "data" / "validation" / subject_id
+
+
 # ---------------------------------------------------------------------------
 # Self-test
 # ---------------------------------------------------------------------------
@@ -134,8 +139,8 @@ if __name__ == "__main__":
     print("=" * 60)
 
     # 1. PROFILES
-    assert PROFILES["debug"] == (256, 2.0)
-    assert PROFILES["dev"] == (512, 1.0)
+    assert PROFILES["debug"] == (128, 2.0)
+    assert PROFILES["dev"] == (256, 1.0)
     assert PROFILES["prod"] == (512, 0.5)
     print("[PASS] PROFILES values correct")
 

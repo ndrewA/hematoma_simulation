@@ -51,6 +51,10 @@ def parse_args(argv=None):
         "--grid-size", type=int,
         help="Grid size N (required with --dx, ignored with --profile)",
     )
+    parser.add_argument(
+        "--skip-validation", action="store_true",
+        help="Skip the cross-cutting validation step",
+    )
 
     args = parser.parse_args(argv)
 
@@ -89,8 +93,12 @@ def main(argv=None):
     print(f"  Grid: {args.N}^3, dx={args.dx} mm")
     print("=" * 60)
 
+    steps = STEPS
+    if args.skip_validation:
+        steps = [(n, m) for n, m in STEPS if m != "preprocessing.validation"]
+
     with step("Pipeline total"):
-        for step_name, module_name in STEPS:
+        for step_name, module_name in steps:
             print(f"\n{'─' * 60}")
             print(f"  {step_name}")
             print(f"{'─' * 60}\n")

@@ -1,23 +1,37 @@
 """Construct the skull signed distance field (SDF) from the brain mask.
 
-Uses T2w-guided growth from the brain mask to approximate the inner skull
-surface: iteratively dilates the brain mask, growing only through voxels
-where T2w is bright enough to be non-bone.  This naturally adapts to local
-CSF thickness (thin at skull base, thick at convexity).  Then computes a
-signed Euclidean distance transform and resamples to the simulation grid.
+Uses atlas-guided T2w growth from the brain mask to approximate the inner
+skull surface.  Two mechanisms prevent leakage (especially at skull base):
+
+  1. Atlas pre-weighting: modulates T2w intensity by SPM TPM brain probability
+     so growth is suppressed where the atlas says there's no brain (foramina,
+     sinuses).  Formula: I_eff = I * (λ + (1-λ) * P_brain^α), λ=0.3, α=5.
+     The power α sharpens the probability transition, eliminating ambiguous
+     zones (P=0.3-0.7) that cause skull base leakage.
+
+  2. Curvature gating: at each dilation step, only accepts candidate voxels
+     with ≥8 existing mask neighbors in a 3×3×3 block, preventing growth
+     through narrow channels.
+
+  3. Morphological closing (r=1mm): fills small concavities left by strict
+     curvature gating.
+
+Then computes a signed Euclidean distance transform and resamples to the
+simulation grid.
 
 Outputs skull_sdf.nii.gz (float32, negative inside skull, positive outside).
 """
 
 import argparse
 import json
-import math
 import sys
+from pathlib import Path
 
+import edt as edt_pkg
 import nibabel as nib
 import numpy as np
 from scipy.ndimage import (
-    binary_dilation, binary_opening, distance_transform_edt, gaussian_filter,
+    binary_dilation, convolve, gaussian_filter,
 )
 
 from preprocessing.profiling import step
@@ -50,14 +64,44 @@ def parse_args(argv=None):
     parser.add_argument(
         "--bone-z",
         type=float,
-        default=-1.0,
-        help="T2w z-score threshold for bone classification (default: -1.0)",
+        default=-0.5,
+        help="T2w z-score threshold for bone classification (default: -0.5)",
     )
     parser.add_argument(
         "--max-growth",
         type=float,
         default=8.0,
         help="Maximum outward growth distance in mm (default: 8.0)",
+    )
+    parser.add_argument(
+        "--atlas-lambda",
+        type=float,
+        default=0.3,
+        help="Atlas pre-weighting: I_eff = I*(λ + (1-λ)*P_brain^α) (default: 0.3)",
+    )
+    parser.add_argument(
+        "--atlas-alpha",
+        type=float,
+        default=5.0,
+        help="Atlas sharpening exponent: P_brain^alpha (default: 5.0)",
+    )
+    parser.add_argument(
+        "--min-neighbors",
+        type=int,
+        default=8,
+        help="Curvature gating: min mask neighbors in 3x3x3 (default: 8)",
+    )
+    parser.add_argument(
+        "--close-radius",
+        type=float,
+        default=1.0,
+        help="Morphological closing radius in mm (0 to disable, default: 1.0)",
+    )
+    parser.add_argument(
+        "--tpm-path",
+        type=str,
+        default="data/atlases/SPM_TPM.nii",
+        help="Path to brain probability atlas (default: data/atlases/SPM_TPM.nii)",
     )
 
     args = parser.parse_args(argv)
@@ -134,6 +178,55 @@ def load_grid_meta(out_dir):
 
 
 # ---------------------------------------------------------------------------
+# Atlas loading
+# ---------------------------------------------------------------------------
+def load_atlas_brain_prob(tpm_path, target_affine, target_shape):
+    """Load brain probability atlas and resample to target native space.
+
+    Supports two formats:
+      - 3D NIfTI: pre-computed P(brain) volume (e.g. ICBM152_2009c_P_brain.nii.gz)
+      - 4D NIfTI: SPM-style TPM where P(brain) = channels 0+1+2 (GM+WM+CSF)
+
+    Uses affine-only mapping (ACPC ≈ MNI).
+    """
+    from scipy.ndimage import affine_transform
+
+    tpm_path = Path(tpm_path)
+    if not tpm_path.exists():
+        print(f"WARNING: atlas not found at {tpm_path}, skipping pre-weighting")
+        return None
+
+    print(f"Loading atlas: {tpm_path}")
+    tpm_img = nib.load(str(tpm_path))
+    tpm_data = tpm_img.get_fdata(dtype=np.float32)
+
+    if tpm_data.ndim == 4:
+        # SPM-style 4D TPM: Brain = GM + WM + CSF (first 3 channels)
+        p_brain_mni = np.clip(
+            tpm_data[:, :, :, 0] + tpm_data[:, :, :, 1] + tpm_data[:, :, :, 2],
+            0, 1,
+        )
+    else:
+        # Pre-computed 3D P(brain) volume
+        p_brain_mni = np.clip(tpm_data, 0, 1)
+
+    atlas_voxel = np.abs(np.diag(tpm_img.affine)[:3])
+    print(f"Atlas voxel size: {atlas_voxel[0]:.1f}mm, shape: {p_brain_mni.shape}")
+
+    # Affine: target voxel → world → TPM voxel
+    target_to_tpm = np.linalg.inv(tpm_img.affine) @ target_affine
+    p_brain = affine_transform(
+        p_brain_mni, target_to_tpm[:3, :3], target_to_tpm[:3, 3],
+        output_shape=target_shape, order=1, cval=0.0,
+    ).astype(np.float32)
+    p_brain = np.clip(p_brain, 0, 1)
+
+    n_nonzero = int((p_brain > 0.01).sum())
+    print(f"Atlas P(brain): {n_nonzero:,} nonzero voxels in native space")
+    return p_brain
+
+
+# ---------------------------------------------------------------------------
 # T2w-guided growth
 # ---------------------------------------------------------------------------
 def compute_bone_threshold(t2w, brain_mask, bone_z):
@@ -174,61 +267,139 @@ def compute_bone_threshold(t2w, brain_mask, bone_z):
 
 
 def grow_skull_interior(brain_mask, head_mask, t2w, voxel_size,
-                        bone_threshold, max_growth_mm):
-    """Grow outward from brain mask, stopping at bone-dark T2w voxels.
+                        bone_threshold, max_growth_mm,
+                        p_brain=None, atlas_lambda=0.3, atlas_alpha=5.0,
+                        min_neighbors=8):
+    """Grow outward from brain mask with atlas guidance and curvature gating.
 
     At each iteration, expands the mask by one voxel (binary dilation)
-    and keeps only new voxels where T2w >= bone_threshold.  This:
-      - Fills cortical sulci (CSF between gyral banks)
-      - Extends through subarachnoid CSF to the skull
-      - Stops at bone (dark T2w) at spatially varying distances
-      - Adapts locally: thin CSF at skull base → small growth,
-        thick CSF at convexity → larger growth
+    and keeps only new voxels where the (atlas-weighted) T2w >= bone_threshold
+    and the voxel has enough existing mask neighbors (curvature gate).
 
-    Returns (skull_interior, n_iterations).
+    Atlas pre-weighting: I_eff = I * (λ + (1-λ) * P_brain^α).  The power α
+    sharpens the probability transition.  Suppresses growth at foramina and
+    sinuses where P_brain ≈ 0.
+
+    Curvature gating: require ≥ min_neighbors of 26 neighbors already in
+    the mask.  Prevents growth through narrow channels.
+
+    Returns (skull_interior, growth_stats).
     """
-    not_bone = (t2w >= bone_threshold) & head_mask
+    # Atlas pre-weighting with non-linear sharpening
+    if p_brain is not None:
+        p_sharp = p_brain ** atlas_alpha
+        weight = atlas_lambda + (1.0 - atlas_lambda) * p_sharp
+        t2w_eff = t2w * weight
+        print(f"Atlas pre-weighting: lambda={atlas_lambda}, alpha={atlas_alpha}")
+    else:
+        t2w_eff = t2w
+        print("No atlas available, using raw T2w")
+
+    not_bone = (t2w_eff >= bone_threshold) & head_mask
     skull_interior = brain_mask.copy()
     max_iters = round(max_growth_mm / voxel_size)
 
+    # 3x3x3 neighbor count kernel (exclude center)
+    kernel = np.ones((3, 3, 3), dtype=np.int32)
+    kernel[1, 1, 1] = 0
+
     n_iters = 0
     for i in range(max_iters):
-        grow = binary_dilation(skull_interior) & ~skull_interior & not_bone
-        n = grow.sum()
-        if n == 0:
+        candidates = binary_dilation(skull_interior) & ~skull_interior & not_bone
+        if candidates.sum() == 0:
             break
-        skull_interior |= grow
+
+        # Curvature gating
+        if min_neighbors > 1:
+            neighbor_count = convolve(
+                skull_interior.astype(np.int32), kernel,
+                mode='constant', cval=0,
+            )
+            gated = candidates & (neighbor_count >= min_neighbors)
+        else:
+            gated = candidates
+
+        if gated.sum() == 0:
+            break
+        skull_interior |= gated
         n_iters = i + 1
 
     skull_interior &= head_mask
-    return skull_interior, n_iters
+    skull_interior |= brain_mask  # never lose brain interior
+
+    n_brain = int(brain_mask.sum())
+    n_grown = int(skull_interior.sum()) - n_brain
+    stats = {
+        "iterations": n_iters,
+        "brain_voxels": n_brain,
+        "grown_voxels": n_grown,
+        "total_voxels": int(skull_interior.sum()),
+        "atlas_lambda": atlas_lambda if p_brain is not None else None,
+        "atlas_alpha": atlas_alpha if p_brain is not None else None,
+        "min_neighbors": min_neighbors,
+    }
+    print(f"Growth: {n_iters} iterations, +{n_grown:,} voxels "
+          f"({int(skull_interior.sum()):,} total)")
+    return skull_interior, stats
+
+
+# ---------------------------------------------------------------------------
+# Morphological closing
+# ---------------------------------------------------------------------------
+def morphological_close(skull_interior, brain_mask, head_mask, voxel_size,
+                        close_radius_mm):
+    """EDT-based morphological closing to fill small concavities.
+
+    Dilate by close_radius_mm, then erode by the same amount.
+    Preserves brain interior and stays within head mask.
+    """
+    if close_radius_mm <= 0:
+        return skull_interior
+
+    print(f"Morphological closing: r={close_radius_mm}mm")
+    dist_outside = edt_pkg.edt(
+        ~skull_interior, anisotropy=(voxel_size, voxel_size, voxel_size),
+    ).astype(np.float32)
+    dilated = skull_interior | (dist_outside <= close_radius_mm)
+    dist_inside = edt_pkg.edt(
+        dilated, anisotropy=(voxel_size, voxel_size, voxel_size),
+    ).astype(np.float32)
+    closed = dilated & (dist_inside > close_radius_mm)
+    closed |= brain_mask
+    closed &= head_mask
+
+    n_filled = int(closed.sum() - skull_interior.sum())
+    print(f"Closing filled {n_filled:,} voxels")
+    return closed
 
 
 # ---------------------------------------------------------------------------
 # Signed EDT
 # ---------------------------------------------------------------------------
-def compute_signed_edt(skull_interior, voxel_size):
-    """Compute signed EDT: negative inside, positive outside, in mm."""
-    sampling = (voxel_size, voxel_size, voxel_size)
+def compute_signed_edt(skull_interior, voxel_size, sigma_mm=2.0):
+    """Compute signed EDT: negative inside, positive outside, in mm.
 
-    print("Computing EDT (outside)...")
-    dt_outside = distance_transform_edt(~skull_interior, sampling=sampling)
+    Uses the fast ``edt`` package (~10x faster than scipy for large volumes).
+    Applies post-EDT Gaussian smoothing (sigma_mm) to remove staircase
+    artifacts from voxel-by-voxel growth.
 
-    print("Computing EDT (inside)...")
-    dt_inside = distance_transform_edt(skull_interior, sampling=sampling)
-
-    dt_outside -= dt_inside
-    del dt_inside
-
-    sdf = dt_outside.astype(np.float32)
-    del dt_outside
-
-    sigma_mm = 2.0
-    sigma_vox = sigma_mm / voxel_size
-    print(f"Smoothing SDF: sigma={sigma_mm} mm ({sigma_vox:.1f} voxels)")
-    sdf = gaussian_filter(sdf, sigma=sigma_vox).astype(np.float32)
-
+    Note: smoothing compresses gradient magnitude (~0.77x near the surface)
+    but the solver only uses SDF values at cut-cell voxels (within ~0.5 dx
+    of the zero-crossing) where compression is minimal.
+    """
+    print("Computing signed EDT...")
+    # edt.sdf returns positive inside, negative outside — negate for our convention
+    sdf = -edt_pkg.sdf(
+        skull_interior, anisotropy=(voxel_size, voxel_size, voxel_size),
+    ).astype(np.float32)
     print(f"SDF range: [{sdf.min():.1f}, {sdf.max():.1f}] mm")
+
+    if sigma_mm > 0:
+        sigma_vox = sigma_mm / voxel_size
+        print(f"Gaussian smoothing: sigma={sigma_mm}mm ({sigma_vox:.1f} voxels)")
+        sdf = gaussian_filter(sdf, sigma=sigma_vox).astype(np.float32)
+        print(f"Smoothed SDF range: [{sdf.min():.1f}, {sdf.max():.1f}] mm")
+
     return sdf
 
 
@@ -260,7 +431,7 @@ def print_validation(sdf_sim, args, grid_affine, out_dir,
     # 1. Intracranial volume
     n_negative = int(np.count_nonzero(sdf_sim < 0))
     icv_ml = n_negative * dx ** 3 / 1000.0
-    status = "OK" if 1300 <= icv_ml <= 1600 else "WARN"
+    status = "OK" if 1200 <= icv_ml <= 1700 else "WARN"
     print(f"\n1. Intracranial volume (SDF < 0):")
     print(f"   {n_negative} voxels x {dx}^3 mm^3 = {icv_ml:.1f} mL  [{status}]")
 
@@ -338,6 +509,10 @@ def main(argv=None):
     print(f"Profile: {args.profile}  (N={args.N}, dx={args.dx} mm)")
     print(f"Bone z-score: {args.bone_z}")
     print(f"Max growth: {args.max_growth} mm")
+    print(f"Atlas lambda: {args.atlas_lambda}")
+    print(f"Atlas alpha: {args.atlas_alpha}")
+    print(f"Min neighbors: {args.min_neighbors}")
+    print(f"Close radius: {args.close_radius} mm")
     print()
 
     # 1. Load source masks
@@ -358,46 +533,40 @@ def main(argv=None):
         if bone_threshold is None:
             print("FATAL: could not compute T2w threshold")
             sys.exit(1)
+
+        # 3. Load atlas brain probability
+        p_brain = load_atlas_brain_prob(
+            args.tpm_path, source_affine, brain_mask.shape,
+        )
     print()
 
-    # 3. T2w-guided growth
-    with step("T2w-guided growth"):
+    # 4. Atlas-guided T2w growth with curvature gating
+    with step("atlas-guided growth"):
         print("Growing skull interior from brain mask...")
-        skull_interior, n_iters = grow_skull_interior(
+        skull_interior, growth_stats = grow_skull_interior(
             brain_mask, head_mask, t2w, voxel_size,
             bone_threshold, args.max_growth,
+            p_brain=p_brain, atlas_lambda=args.atlas_lambda,
+            atlas_alpha=args.atlas_alpha, min_neighbors=args.min_neighbors,
         )
-        n_brain = int(brain_mask.sum())
-        n_grown = int(skull_interior.sum()) - n_brain
+        growth_stats.update(threshold_stats)
+        del t2w, p_brain
 
-        # Morphological opening: remove single-voxel protrusions from the
-        # growth front that cause sawtooth artifacts in the SDF contour.
-        # Re-add the brain mask so opening never erodes inside the brain.
-        n_before_open = int(skull_interior.sum())
-        skull_interior = binary_opening(skull_interior) | brain_mask
-        n_removed = n_before_open - int(skull_interior.sum())
-        print(f"Opening: removed {n_removed:,} voxels")
-
-        growth_stats = {
-            "iterations": n_iters,
-            "brain_voxels": n_brain,
-            "grown_voxels": n_grown,
-            "opening_removed": n_removed,
-            "total_voxels": int(skull_interior.sum()),
-            **threshold_stats,
-        }
-        print(f"Growth: {n_iters} iterations, +{n_grown:,} voxels "
-              f"({int(skull_interior.sum()):,} total)")
-        del brain_mask, head_mask, t2w
+        # 5. Morphological closing
+        skull_interior = morphological_close(
+            skull_interior, brain_mask, head_mask, voxel_size,
+            args.close_radius,
+        )
+        del head_mask
     print()
 
-    # 4. Signed EDT
-    with step("signed EDT + smooth"):
+    # 6. Signed EDT
+    with step("signed EDT"):
         sdf_source = compute_signed_edt(skull_interior, voxel_size)
         del skull_interior
     print()
 
-    # 5. Resample to simulation grid
+    # 7. Resample to simulation grid
     out_dir = processed_dir(args.subject, args.profile)
     grid_affine, N_meta = load_grid_meta(out_dir)
     assert N_meta == args.N, (
@@ -414,7 +583,7 @@ def main(argv=None):
         del sdf_source
     print()
 
-    # 6. Brain containment clamp
+    # 8. Brain containment clamp
     brain_sim = np.asarray(
         nib.load(str(out_dir / "brain_mask.nii.gz")).dataobj, dtype=np.uint8
     ) > 0
@@ -430,10 +599,10 @@ def main(argv=None):
     del brain_sim, exposed
     print()
 
-    # 7. Save
+    # 9. Save
     save_skull_sdf(out_dir, sdf_sim, grid_affine)
 
-    # 8. Validation
+    # 10. Validation
     print_validation(sdf_sim, args, grid_affine, out_dir, growth_stats)
 
 

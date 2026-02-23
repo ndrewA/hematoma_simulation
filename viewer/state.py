@@ -127,9 +127,8 @@ class ViewState:
         self.layout = LayoutManager()
         self.focused_panel = -1
         self.show_ui = True
-        self._save_screenshot = False
         # 3D voxel renderer: per-group opacity [brain, csf, dura, skull, choroid, vessel]
-        self.group_opacity = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+        self.group_opacity = [1.0, 1.0, 1.0, 0.0, 1.0, 1.0]
         # Mouse drag state
         self._prev_mouse = None
         self._dragging = False

@@ -27,20 +27,21 @@ import nibabel as nib
 import numpy as np
 
 from preprocessing.profiling import step
-from preprocessing.utils import PROFILES, processed_dir, raw_dir
+from preprocessing.utils import PROFILES, processed_dir, raw_dir, validation_dir
 
 
 # ---------------------------------------------------------------------------
 # Phase display names (for console summary)
 # ---------------------------------------------------------------------------
 PHASE_DISPLAY = {
-    "header":      "Header Consistency",
-    "domain":      "Domain Closure",
-    "material":    "Material Integrity",
-    "volume":      "Volume Sanity",
-    "compartment": "Compartmentalization",
-    "dural":       "Dural Membrane",
-    "fiber":       "Fiber Coverage",
+    "header":       "Header Consistency",
+    "domain":       "Domain Closure",
+    "material":     "Material Integrity",
+    "volume":       "Volume Sanity",
+    "compartment":  "Compartmentalization",
+    "dural":        "Dural Membrane",
+    "fiber":        "Fiber Coverage",
+    "ground_truth": "Ground Truth (SimNIBS)",
 }
 
 
@@ -61,6 +62,9 @@ class CheckContext:
         self.results = []
         self.census = {}
         self.metrics = {}
+        self.has_simnibs = (
+            validation_dir(subject) / "final_tissues.nii.gz"
+        ).exists()
 
     # -- Lazy properties --
 
@@ -173,6 +177,8 @@ def parse_args(argv=None):
                         help="Skip fiber checks (Phase 4)")
     parser.add_argument("--no-dural", action="store_true",
                         help="Skip dural checks (Phase 3)")
+    parser.add_argument("--no-ground-truth", action="store_true",
+                        help="Skip ground truth checks (Phase 5)")
     parser.add_argument("--verbose", action="store_true",
                         help="Print per-check detail")
     parser.add_argument(
@@ -245,13 +251,15 @@ def _build_paths(subject, profile):
         "fig2":    val_dir / "fig2_dural_detail.png",
         "fig3":    val_dir / "fig3_skull_sdf.png",
         "fig4":    val_dir / "fig4_fiber_dec.png",
+        "fig5":    val_dir / "fig5_skull_sdf_vs_simnibs.png",
+        "fig6":    val_dir / "fig6_surface_distance.png",
     }
 
 
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
-def run_checks(ctx, selected, no_dural, no_fiber):
+def run_checks(ctx, selected, no_dural, no_fiber, no_ground_truth):
     """Execute selected checks via the registry."""
     from preprocessing.validation.checks import _REGISTRY
 
@@ -281,11 +289,16 @@ def run_checks(ctx, selected, no_dural, no_fiber):
             continue
         if no_fiber and defn.phase == "fiber":
             continue
+        if no_ground_truth and defn.phase == "ground_truth":
+            continue
         if "fiber_img" in defn.needs and ctx.fiber_img is None:
             ctx.record(defn.check_id, True, value="skipped (no fiber)")
             continue
         if "fs" in defn.needs and not ctx.paths["fs"].exists():
             ctx.record(defn.check_id, True, value="skipped (no fs_labels)")
+            continue
+        if "simnibs" in defn.needs and not ctx.has_simnibs:
+            ctx.record(defn.check_id, True, value="skipped (no SimNIBS)")
             continue
         defn.func(ctx)
 
@@ -318,6 +331,8 @@ def build_report(subject, profile, N, dx, all_results, census, metrics):
         "fig2_dural_detail.png",
         "fig3_skull_sdf.png",
         "fig4_fiber_dec.png",
+        "fig5_skull_sdf_vs_simnibs.png",
+        "fig6_surface_distance.png",
     ]
 
     return {
@@ -439,6 +454,7 @@ def main(argv=None):
     N, dx = PROFILES[profile]
     no_fiber = args.no_fiber
     no_dural = args.no_dural
+    no_ground_truth = args.no_ground_truth
     verbose = args.verbose
 
     figures_only = args.only_figures is not None
@@ -455,7 +471,8 @@ def main(argv=None):
     if selected is not None:
         print(f"Checks: {', '.join(sorted(selected))}")
     if not figures_only:
-        print(f"Flags: no_images={no_images}, no_fiber={no_fiber}, no_dural={no_dural}")
+        print(f"Flags: no_images={no_images}, no_fiber={no_fiber}, "
+              f"no_dural={no_dural}, no_ground_truth={no_ground_truth}")
     print()
 
     paths = _build_paths(subject, profile)
@@ -478,8 +495,12 @@ def main(argv=None):
         print(f"WARNING: fiber_M0 not found, skipping fiber checks")
         no_fiber = True
 
+    if not no_ground_truth and not ctx.has_simnibs:
+        print(f"WARNING: SimNIBS ground truth not found, skipping ground truth checks")
+        no_ground_truth = True
+
     with step("run checks"):
-        run_checks(ctx, selected, no_dural, no_fiber)
+        run_checks(ctx, selected, no_dural, no_fiber, no_ground_truth)
 
     # Abort early on critical header failures
     critical_fails = [r for r in ctx.results
