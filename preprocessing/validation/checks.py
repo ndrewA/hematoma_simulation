@@ -1143,63 +1143,14 @@ def _load_simnibs_resampled(ctx):
     return {"labels": labels, "sdf": sdf, "inner_boundary": inner_boundary}
 
 
-@check("G1", severity="WARN", phase="ground_truth", needs={"sdf", "simnibs"})
-def check_g1(ctx):
-    """Skull SDF MAE at SimNIBS inner skull boundary."""
-    sim = ctx.get_cached("simnibs_resampled",
-                         lambda: _load_simnibs_resampled(ctx))
-    inner_boundary = sim["inner_boundary"]
-    n_boundary = int(inner_boundary.sum())
-    if n_boundary == 0:
-        ctx.record("G1", True, value="no boundary voxels")
-        return
+def _compute_surface_distances(ctx):
+    """Extract zero-level-set surfaces and compute pairwise distances.
 
-    sdf_at_boundary = ctx.sdf[inner_boundary]
-    mae = float(np.mean(np.abs(sdf_at_boundary)))
-    median = float(np.median(sdf_at_boundary))
-    ctx.metrics["gt_boundary_mae_mm"] = round(mae, 3)
-    ctx.metrics["gt_boundary_median_mm"] = round(median, 3)
-    ctx.metrics["gt_boundary_n_voxels"] = n_boundary
-    ctx.record("G1", mae <= 2.0,
-               value=f"MAE={mae:.2f}mm, med={median:+.2f}mm, n={n_boundary:,}")
+    Uses marching cubes to extract sub-voxel isosurfaces from both our SDF
+    and the SimNIBS SDF, then builds KD-trees for distance queries.
 
-
-@check("G2", severity="INFO", phase="ground_truth", needs={"sdf", "simnibs"})
-def check_g2(ctx):
-    """Regional error by axial thirds (inferior/middle/superior)."""
-    sim = ctx.get_cached("simnibs_resampled",
-                         lambda: _load_simnibs_resampled(ctx))
-    inner_boundary = sim["inner_boundary"]
-    zs = np.where(inner_boundary.any(axis=(0, 1)))[0]
-    if len(zs) == 0:
-        ctx.record("G2", True, value="no boundary voxels")
-        return
-
-    z_min, z_max = int(zs[0]), int(zs[-1])
-    z_span = z_max - z_min
-    cuts = [z_min, z_min + z_span // 3,
-            z_min + 2 * z_span // 3, z_max + 1]
-
-    parts = []
-    for name, z_lo, z_hi in [("inf", cuts[0], cuts[1]),
-                              ("mid", cuts[1], cuts[2]),
-                              ("sup", cuts[2], cuts[3])]:
-        region = inner_boundary.copy()
-        region[:, :, :z_lo] = False
-        region[:, :, z_hi:] = False
-        n_r = int(region.sum())
-        if n_r > 0:
-            vals = ctx.sdf[region]
-            mae = float(np.mean(np.abs(vals)))
-            ctx.metrics[f"gt_{name}_mae_mm"] = round(mae, 3)
-            parts.append(f"{name}={mae:.2f}")
-
-    ctx.record("G2", True, value=", ".join(parts))
-
-
-@check("G3", severity="INFO", phase="ground_truth", needs={"sdf", "simnibs"})
-def check_g3(ctx):
-    """Symmetric surface distance (marching cubes + KD-tree)."""
+    Cached as 'surface_distances'.
+    """
     from skimage.measure import marching_cubes
     from scipy.spatial import cKDTree
 
@@ -1212,32 +1163,96 @@ def check_g3(ctx):
     def _isosurface(vol, affine):
         verts_vox, _, _, _ = marching_cubes(vol, level=0.0)
         ones = np.ones((len(verts_vox), 1), dtype=verts_vox.dtype)
-        return (affine @ np.hstack([verts_vox, ones]).T).T[:, :3]
+        verts_phys = (affine @ np.hstack([verts_vox, ones]).T).T[:, :3]
+        return verts_vox, verts_phys
 
-    verts_ours = _isosurface(our_sdf, our_affine)
-    verts_sim = _isosurface(sim_sdf, our_affine)
+    vox_ours, phys_ours = _isosurface(our_sdf, our_affine)
+    vox_sim, phys_sim = _isosurface(sim_sdf, our_affine)
 
-    tree_ours = cKDTree(verts_ours)
-    tree_sim = cKDTree(verts_sim)
-    d_o2s, _ = tree_sim.query(verts_ours)
-    d_s2o, _ = tree_ours.query(verts_sim)
+    tree_ours = cKDTree(phys_ours)
+    tree_sim = cKDTree(phys_sim)
+    d_o2s, _ = tree_sim.query(phys_ours)
+    d_s2o, _ = tree_ours.query(phys_sim)
+
+    return {
+        "vox_ours": vox_ours, "phys_ours": phys_ours,
+        "vox_sim": vox_sim, "phys_sim": phys_sim,
+        "d_o2s": d_o2s, "d_s2o": d_s2o,
+    }
+
+
+@check("G1", severity="WARN", phase="ground_truth", needs={"sdf", "simnibs"})
+def check_g1(ctx):
+    """Average symmetric surface distance (marching cubes + KD-tree)."""
+    sd = ctx.get_cached("surface_distances",
+                        lambda: _compute_surface_distances(ctx))
+    d_o2s = sd["d_o2s"]
+    d_s2o = sd["d_s2o"]
     all_d = np.concatenate([d_o2s, d_s2o])
 
-    mean_d = float(all_d.mean())
+    assd = float(all_d.mean())
     median_d = float(np.median(all_d))
     p95_d = float(np.percentile(all_d, 95))
+
+    ctx.metrics["gt_assd_mm"] = round(assd, 3)
+    ctx.metrics["gt_surface_median_mm"] = round(median_d, 3)
+    ctx.metrics["gt_surface_p95_mm"] = round(p95_d, 3)
+    ctx.metrics["gt_n_verts_ours"] = len(d_o2s)
+    ctx.metrics["gt_n_verts_sim"] = len(d_s2o)
+    ctx.record("G1", assd <= 2.0,
+               value=f"ASSD={assd:.2f}mm, med={median_d:.2f}mm, "
+                     f"P95={p95_d:.2f}mm")
+
+
+@check("G2", severity="INFO", phase="ground_truth", needs={"sdf", "simnibs"})
+def check_g2(ctx):
+    """Regional surface distance by axial thirds (inferior/middle/superior)."""
+    sd = ctx.get_cached("surface_distances",
+                        lambda: _compute_surface_distances(ctx))
+    # Use ours→sim distances, binned by z-coordinate of our surface vertices
+    vox_ours = sd["vox_ours"]
+    d_o2s = sd["d_o2s"]
+
+    if len(vox_ours) == 0:
+        ctx.record("G2", True, value="no surface vertices")
+        return
+
+    z_coords = vox_ours[:, 2]  # z in voxel space
+    z_min, z_max = float(z_coords.min()), float(z_coords.max())
+    z_span = z_max - z_min
+    cuts = [z_min, z_min + z_span / 3, z_min + 2 * z_span / 3, z_max + 1]
+
+    parts = []
+    for name, z_lo, z_hi in [("inf", cuts[0], cuts[1]),
+                              ("mid", cuts[1], cuts[2]),
+                              ("sup", cuts[2], cuts[3])]:
+        mask = (z_coords >= z_lo) & (z_coords < z_hi)
+        n_r = int(mask.sum())
+        if n_r > 0:
+            mean_d = float(d_o2s[mask].mean())
+            ctx.metrics[f"gt_{name}_mae_mm"] = round(mean_d, 3)
+            parts.append(f"{name}={mean_d:.2f}")
+
+    ctx.record("G2", True, value=", ".join(parts))
+
+
+@check("G3", severity="INFO", phase="ground_truth", needs={"sdf", "simnibs"})
+def check_g3(ctx):
+    """Per-direction surface distance detail (ours→sim, sim→ours)."""
+    sd = ctx.get_cached("surface_distances",
+                        lambda: _compute_surface_distances(ctx))
+    d_o2s = sd["d_o2s"]
+    d_s2o = sd["d_s2o"]
+    all_d = np.concatenate([d_o2s, d_s2o])
+
     hausdorff = float(all_d.max())
     hd95 = float(np.percentile(all_d, 95))
 
-    # Per-direction
     o2s_p95 = float(np.percentile(d_o2s, 95))
     o2s_max = float(d_o2s.max())
     s2o_p95 = float(np.percentile(d_s2o, 95))
     s2o_max = float(d_s2o.max())
 
-    ctx.metrics["gt_surface_mean_mm"] = round(mean_d, 3)
-    ctx.metrics["gt_surface_median_mm"] = round(median_d, 3)
-    ctx.metrics["gt_surface_p95_mm"] = round(p95_d, 3)
     ctx.metrics["gt_surface_hausdorff_mm"] = round(hausdorff, 3)
     ctx.metrics["gt_surface_hd95_mm"] = round(hd95, 3)
     ctx.metrics["gt_o2s_p95_mm"] = round(o2s_p95, 3)
@@ -1246,15 +1261,15 @@ def check_g3(ctx):
     ctx.metrics["gt_s2o_hausdorff_mm"] = round(s2o_max, 3)
 
     # Cache vertices for fig6
-    ctx._cache["gt_verts_ours"] = verts_ours
-    ctx._cache["gt_verts_sim"] = verts_sim
+    ctx._cache["gt_verts_ours"] = sd["phys_ours"]
+    ctx._cache["gt_verts_sim"] = sd["phys_sim"]
     ctx._cache["gt_d_o2s"] = d_o2s
     ctx._cache["gt_d_s2o"] = d_s2o
 
     ctx.record("G3", True,
-               value=f"mean={mean_d:.2f}, med={median_d:.2f}, "
-                     f"P95={p95_d:.2f}, HD={hausdorff:.1f}, "
-                     f"HD95={hd95:.2f}mm")
+               value=f"o2s: mean={d_o2s.mean():.2f} P95={o2s_p95:.2f}, "
+                     f"s2o: mean={d_s2o.mean():.2f} P95={s2o_p95:.2f}, "
+                     f"HD={hausdorff:.1f}mm")
 
 
 # ---------------------------------------------------------------------------

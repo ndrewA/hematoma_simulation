@@ -67,6 +67,11 @@ _RATIO_SPLENIUM = _H_SPLENIUM / (_H_SPLENIUM + 2.1)
 _NOTCH_AREA_RATIO = 28.8 / 56.5
 _NOTCH_ASPECT_RATIO = 41.8 / 96.9
 
+# Tentorial notch aspect ratio (length / width)
+# Adler 2002 (n=100): NL 54-62mm / MNW 27-32mm ≈ 1.8
+# Arrambide-Garza 2022 (n=60): NL 55.6mm / MNW 31.3mm ≈ 1.78
+_TENT_NOTCH_AR = 1.8
+
 
 def _build_fs_luts():
     """Build boolean LUTs for left/right cerebral and CC FreeSurfer labels."""
@@ -695,6 +700,77 @@ def reconstruct_falx(mat, fs, skull_sdf, dx_mm, crop_slices,
     return falx_mask
 
 
+def _measure_notch_ellipse(mat_crop, dx_mm):
+    """Measure tentorial notch dimensions from cerebellar gap anatomy.
+
+    Scans the gap between left and right cerebellar medial edges at every
+    AP position across 20mm of axial slices below the tentorial level.
+
+    Width  = maximum median gap (Maximum Notch Width from literature).
+    Length = width × 1.8 (literature aspect ratio, robust across subjects).
+
+    Returns a 2D boolean ellipse mask (X, Y) or None if measurement fails.
+    Also prints diagnostic info.
+    """
+    # Find brainstem at tentorial level
+    brainstem = (mat_crop == 6)
+    if not brainstem.any():
+        return None
+
+    z_indices = np.where(brainstem.any(axis=(0, 1)))[0]
+    z_min_bs, z_max_bs = int(z_indices.min()), int(z_indices.max())
+    tent_z = z_min_bs + 2 * (z_max_bs - z_min_bs) // 3
+
+    bs_2d = brainstem[:, :, tent_z]
+    if not bs_2d.any():
+        return None
+    bs_ij = np.argwhere(bs_2d)
+    bs_centroid = bs_ij.mean(axis=0)
+    mid_x = bs_centroid[0]
+
+    X, Y, Z = mat_crop.shape
+
+    # Measure gap at every y across z-levels below tentorial level
+    z_start = max(0, tent_z - round(20.0 / dx_mm))
+    gap_by_y = {}
+    for z in range(z_start, tent_z + 1):
+        cereb_slice = (mat_crop[:, :, z] == 4) | (mat_crop[:, :, z] == 5)
+        for y in range(Y):
+            col = cereb_slice[:, y]
+            left_x = np.where(col[:int(mid_x)])[0]
+            right_x = np.where(col[int(mid_x):])[0]
+            if len(left_x) > 0 and len(right_x) > 0:
+                left_medial = left_x.max()
+                right_medial = int(mid_x) + right_x.min()
+                gap_w = (right_medial - left_medial) * dx_mm
+                if 5 < gap_w < 80:
+                    gap_by_y.setdefault(y, []).append(gap_w)
+
+    if not gap_by_y:
+        return None
+
+    # MNW = max of median gap at each y
+    median_gaps = {y: float(np.median(ws)) for y, ws in gap_by_y.items()}
+    mnw = max(median_gaps.values())
+    length = mnw * _TENT_NOTCH_AR
+    buffer_mm = 2.0
+
+    semi_x = (mnw / 2 + buffer_mm) / dx_mm
+    semi_y = (length / 2 + buffer_mm) / dx_mm
+
+    xx, yy = np.mgrid[:X, :Y]
+    ellipse = (
+        (xx - bs_centroid[0]) ** 2 / max(semi_x ** 2, 1)
+        + (yy - bs_centroid[1]) ** 2 / max(semi_y ** 2, 1)
+    ) <= 1.0
+
+    area_cm2 = ellipse.sum() * dx_mm ** 2 / 100
+    print(f"  Notch ellipse: MNW={mnw:.1f}mm, NL={length:.1f}mm, "
+          f"area={area_cm2:.1f}cm² (lit: ~13cm²)")
+
+    return ellipse
+
+
 def reconstruct_tentorium(mat, dx_mm, notch_radius, crop_slices,
                           thickness_mm=0.5):
     """Reconstruct the tentorium cerebelli via sign-change EDT watershed.
@@ -731,20 +807,23 @@ def reconstruct_tentorium(mat, dx_mm, notch_radius, crop_slices,
 
     # Eligible: non-vacuum minus notch exclusion
     eligible = (mat_crop > 0)
-    r_notch_vox = notch_radius / dx_mm
-    brainstem_crop = (mat_crop == 6)
-    if r_notch_vox >= 1.0 and brainstem_crop.any():
-        # Use brainstem cross-section at the tentorial level rather than
-        # projecting across all z (which includes the wider pons below).
-        z_indices = np.where(brainstem_crop.any(axis=(0, 1)))[0]
-        z_min_bs, z_max_bs = int(z_indices.min()), int(z_indices.max())
-        tent_z_local = z_min_bs + 2 * (z_max_bs - z_min_bs) // 3
-        bs_xy = brainstem_crop[:, :, tent_z_local]
-        n_iter = max(1, round(r_notch_vox))
-        bs_dilated = binary_dilation(bs_xy, iterations=n_iter)
-        eligible &= ~bs_dilated[:, :, np.newaxis]
-        del bs_xy, bs_dilated
-    del brainstem_crop
+    notch_ellipse = _measure_notch_ellipse(mat_crop, dx_mm)
+    if notch_ellipse is not None:
+        eligible &= ~notch_ellipse[:, :, np.newaxis]
+    else:
+        # Fallback: brainstem dilation (original method)
+        brainstem_crop = (mat_crop == 6)
+        r_notch_vox = notch_radius / dx_mm
+        if r_notch_vox >= 1.0 and brainstem_crop.any():
+            z_indices = np.where(brainstem_crop.any(axis=(0, 1)))[0]
+            z_min_bs, z_max_bs = int(z_indices.min()), int(z_indices.max())
+            tent_z_local = z_min_bs + 2 * (z_max_bs - z_min_bs) // 3
+            bs_xy = brainstem_crop[:, :, tent_z_local]
+            n_iter = max(1, round(r_notch_vox))
+            bs_dilated = binary_dilation(bs_xy, iterations=n_iter)
+            eligible &= ~bs_dilated[:, :, np.newaxis]
+            del bs_xy, bs_dilated
+        del brainstem_crop
 
     # Membrane extraction with target thickness
     tent_crop = _extract_membrane(phi, eligible, thickness_mm)
