@@ -97,7 +97,7 @@ def launch(subject_id, profile):
     print("Controls:")
     print("  Click slice: set crosshair   Drag 3D: orbit   WASD: orbit")
     print("  Up/Down: scroll slices       +/-: zoom         Tab: layout mode")
-    print("  1-6: toggle layers           Enter: fullscreen  H: toggle UI")
+    print("  1-6: toggle layers           Enter: fullscreen")
     print("  H: toggle UI                 Esc: quit")
     print(f"  Layers: {', '.join(f'{i+1}={l.name}' for i, l in enumerate(layers))}")
 
@@ -121,17 +121,21 @@ def launch(subject_id, profile):
             display = ti.Vector.field(3, dtype=ti.f32, shape=(win_w, win_h))
             display_size = [win_w, win_h]
 
-        state.layout.update(win_w, win_h, state.layout_mode, state.fullscreen_panel)
+        # Clamp render area to buffer size to prevent out-of-bounds writes
+        rw = min(win_w, BUF_W)
+        rh = min(win_h, BUF_H)
+
+        state.layout.update(rw, rh, state.layout_mode, state.fullscreen_panel)
 
         if not process_input(window, state):
             break
 
-        clear(buf, win_w, win_h, 0.08, 0.08, 0.10)
+        clear(buf, rw, rh, 0.08, 0.08, 0.10)
 
         # Sidebar background (slightly lighter than main bg)
         sb_x0 = state.layout.sidebar_x0
-        if sb_x0 < win_w:
-            fill_rect(buf, sb_x0, 0, win_w - sb_x0, win_h, 0.11, 0.11, 0.13)
+        if sb_x0 < rw:
+            fill_rect(buf, sb_x0, 0, rw - sb_x0, rh, 0.11, 0.11, 0.13)
 
         # Render slice panels
         for panel_idx in range(3):
@@ -192,7 +196,7 @@ def launch(subject_id, profile):
             draw_panel_border(buf, p3.x0, p3.y0, p3.w, p3.h,
                               *(0.6, 0.6, 0.2) if focused else (0.15, 0.15, 0.18))
 
-        blit(buf, display, win_w, win_h)
+        blit(buf, display, rw, rh)
         canvas.set_image(display)
 
         _draw_gui(window, state, layers)

@@ -23,7 +23,7 @@ def _load_nifti(path):
 
 def load_volume_u8(path):
     """Load a NIfTI as uint8 Taichi field."""
-    data, affine = _load_nifti(path)
+    data, _ = _load_nifti(path)
     data = data.astype(np.uint8)
     field = ti.field(dtype=ti.u8, shape=data.shape)
     field.from_numpy(data)
@@ -32,7 +32,7 @@ def load_volume_u8(path):
 
 def load_volume_f32(path):
     """Load a NIfTI as float32 Taichi field."""
-    data, affine = _load_nifti(path)
+    data, _ = _load_nifti(path)
     data = data.astype(np.float32)
     field = ti.field(dtype=ti.f32, shape=data.shape)
     field.from_numpy(data)

@@ -20,11 +20,10 @@ from scipy.interpolate import PchipInterpolator, interp1d
 from scipy.ndimage import (
     binary_dilation,
     binary_erosion,
-    binary_fill_holes,
     label as cc_label,
 )
 from scipy.spatial import cKDTree
-from skimage.draw import line as draw_line
+from skimage.draw import line as draw_line, polygon as draw_polygon
 
 from preprocessing.profiling import step
 from preprocessing.utils import (
@@ -190,6 +189,109 @@ def _draw_line_safe(y0, z0, y1, z1, target, Y, Z):
     y1, z1 = np.clip(y1, 0, Y - 1), np.clip(z1, 0, Z - 1)
     rr, cc = draw_line(int(y0), int(z0), int(y1), int(z1))
     target[rr, cc] = True
+
+
+def _collect_falx_polygon(inner_ys, inner_zs, crista_y, mem_bot_z, mem_top_z,
+                           mem_exists, mem_y_min, mem_y_max,
+                           tent_post_y, tent_top_z, tent_exists):
+    """Collect ordered polygon vertices for falx cookie-cutter region.
+
+    Traces the closed boundary of the falx region in the sagittal (Y-Z) plane:
+    free edge → skull bottom → frontal wrap → skull top → posterior close →
+    tent top → auto-close to start.  Used with skimage.draw.polygon for
+    scanline fill (even-odd rule) instead of seed-based flood fill.
+    """
+    poly_y = []
+    poly_z = []
+
+    # Free edge (PCHIP + Bezier): anchor → crista
+    for i in range(len(inner_ys)):
+        poly_y.append(float(inner_ys[i]))
+        poly_z.append(float(inner_zs[i]))
+
+    # Free edge end → skull bottom at crista
+    poly_y.append(float(crista_y))
+    poly_z.append(float(mem_bot_z[crista_y]))
+
+    # Skull bottom crista → frontal pole
+    for y in range(crista_y + 1, mem_y_max + 1):
+        if mem_exists[y]:
+            poly_y.append(float(y))
+            poly_z.append(float(mem_bot_z[y]))
+
+    # Frontal pole vertical (bottom → top)
+    if mem_exists[mem_y_max]:
+        poly_y.append(float(mem_y_max))
+        poly_z.append(float(mem_top_z[mem_y_max]))
+
+    # Skull top frontal → posterior
+    for y in range(mem_y_max - 1, mem_y_min - 1, -1):
+        if mem_exists[y]:
+            poly_y.append(float(y))
+            poly_z.append(float(mem_top_z[y]))
+
+    # Posterior vertical (top → bottom)
+    if mem_exists[mem_y_min]:
+        poly_y.append(float(mem_y_min))
+        poly_z.append(float(mem_bot_z[mem_y_min]))
+
+    # Skull bottom posterior → tent start
+    for y in range(mem_y_min + 1, tent_post_y + 1):
+        if mem_exists[y]:
+            poly_y.append(float(y))
+            poly_z.append(float(mem_bot_z[y]))
+
+    # Tent start vertical (bottom → top)
+    if tent_exists[tent_post_y]:
+        poly_y.append(float(tent_post_y))
+        poly_z.append(float(tent_top_z[tent_post_y]))
+
+    # Tent top tent_post → anchor
+    anchor_y = int(round(inner_ys[0]))
+    for y in range(tent_post_y + 1, anchor_y + 1):
+        if tent_exists[y]:
+            poly_y.append(float(y))
+            poly_z.append(float(tent_top_z[y]))
+
+    # skimage.draw.polygon auto-closes (last vertex → first vertex)
+    return np.array(poly_y), np.array(poly_z)
+
+
+def _save_falx_debug_figure(mem_yz, poly_y, poly_z, cookie,
+                             inner_ys, inner_zs, save_path):
+    """Save debug visualization of polygon fill result."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 8))
+
+    # Left: polygon outline on membrane projection
+    axes[0].imshow(mem_yz.T, origin="lower", cmap="gray", aspect="equal")
+    axes[0].plot(poly_y, poly_z, "r-", linewidth=0.5, alpha=0.8)
+    axes[0].plot(inner_ys, inner_zs, "b-", linewidth=1.0, alpha=0.8,
+                 label="free edge")
+    axes[0].legend(fontsize=8)
+    axes[0].set_title("Polygon outline (red) + free edge (blue)")
+    axes[0].set_xlabel("Y (anterior-posterior)")
+    axes[0].set_ylabel("Z (inferior-superior)")
+
+    # Right: cookie overlaid on membrane
+    overlay = np.zeros((*mem_yz.shape, 3))
+    overlay[mem_yz, :] = 0.4
+    overlay[cookie, 1] = 0.9
+    overlay[mem_yz & cookie, 0] = 0.0
+    overlay[mem_yz & cookie, 2] = 0.0
+    axes[1].imshow(np.transpose(overlay, (1, 0, 2)), origin="lower",
+                   aspect="equal")
+    axes[1].set_title("Cookie (green) on membrane (gray)")
+    axes[1].set_xlabel("Y (anterior-posterior)")
+    axes[1].set_ylabel("Z (inferior-superior)")
+
+    fig.tight_layout()
+    fig.savefig(str(save_path), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Debug figure saved: {save_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -573,70 +675,27 @@ def reconstruct_falx(mat, fs, skull_sdf, dx_mm, crop_slices,
     inner_ys = np.concatenate([pchip_ys, bez_y])
     inner_zs = np.concatenate([pchip_zs, bez_z])
 
-    # Flood fill rasterization
-    barrier = np.zeros((Y, Z), dtype=bool)
-
-    # 1. Free edge curve (PCHIP + Bezier)
-    for i in range(len(inner_ys) - 1):
-        _draw_line_safe(round(inner_ys[i]), round(inner_zs[i]),
-                        round(inner_ys[i + 1]), round(inner_zs[i + 1]),
-                        barrier, Y, Z)
-
-    # 2. Tentorium top (anchor backward to posterior extent)
+    # Posterior tent extent (needed for polygon boundary)
     tent_ys_arr = np.where(tent_exists)[0]
     tent_post_y = int(tent_ys_arr.min()) if len(tent_ys_arr) > 0 else anchor_y
-    for y in range(anchor_y, tent_post_y, -1):
-        if tent_exists[y] and tent_exists[y - 1]:
-            _draw_line_safe(y, tent_top_z[y], y - 1, tent_top_z[y - 1],
-                            barrier, Y, Z)
 
-    # 3. Posterior close: tent end -> skull bottom backward -> vertical
-    _draw_line_safe(tent_post_y, tent_top_z[tent_post_y],
-                    tent_post_y, mem_bot_z[tent_post_y], barrier, Y, Z)
-    for y in range(tent_post_y, mem_y_min, -1):
-        if mem_exists[y] and mem_exists[y - 1]:
-            _draw_line_safe(y, mem_bot_z[y], y - 1, mem_bot_z[y - 1],
-                            barrier, Y, Z)
-    if mem_exists[mem_y_min]:
-        _draw_line_safe(mem_y_min, mem_bot_z[mem_y_min],
-                        mem_y_min, mem_top_z[mem_y_min], barrier, Y, Z)
+    # Polygon scanline fill (even-odd rule, no seed point needed)
+    poly_y, poly_z = _collect_falx_polygon(
+        inner_ys, inner_zs, crista_y, mem_bot_z, mem_top_z,
+        mem_exists, mem_y_min, mem_y_max,
+        tent_post_y, tent_top_z, tent_exists)
 
-    # 4. Skull top (mem_y_min -> frontal pole)
-    for y in range(mem_y_min, mem_y_max):
-        if mem_exists[y] and mem_exists[y + 1]:
-            _draw_line_safe(y, mem_top_z[y], y + 1, mem_top_z[y + 1],
-                            barrier, Y, Z)
-
-    # 5. Frontal pole vertical drop
-    if mem_exists[mem_y_max]:
-        _draw_line_safe(mem_y_max, mem_top_z[mem_y_max],
-                        mem_y_max, mem_bot_z[mem_y_max], barrier, Y, Z)
-
-    # 6. Skull bottom (frontal pole back to crista)
-    for y in range(mem_y_max, crista_y, -1):
-        if mem_exists[y] and mem_exists[y - 1]:
-            _draw_line_safe(y, mem_bot_z[y], y - 1, mem_bot_z[y - 1],
-                            barrier, Y, Z)
-
-    # 7. Connect crista skull bottom -> free edge end
-    _draw_line_safe(crista_y, mem_bot_z[crista_y],
-                    int(round(inner_ys[-1])), int(round(inner_zs[-1])),
-                    barrier, Y, Z)
-
-    # Flood fill from midpoint at body CC
-    seed_y = body_y
-    seed_z = (int(float(pchip(float(body_y)))) + mem_top_z[body_y]) // 2
-    if barrier[seed_y, seed_z]:
-        for dz in range(1, 10):
-            if seed_z + dz < Z and not barrier[seed_y, seed_z + dz]:
-                seed_z = seed_z + dz
-                break
-
-    labeled, n_labels = cc_label(~barrier)
-    seed_label = labeled[seed_y, seed_z]
-    flood = labeled == seed_label
-    cookie = binary_fill_holes(flood | barrier)
-    del labeled, flood
+    rr, cc = draw_polygon(poly_y, poly_z, shape=(Y, Z))
+    cookie = np.zeros((Y, Z), dtype=bool)
+    cookie[rr, cc] = True
+    # Include polygon outline (boundary voxels matter for the membrane)
+    for i in range(len(poly_y) - 1):
+        rr_e, cc_e = draw_line(
+            np.clip(int(round(poly_y[i])), 0, Y - 1),
+            np.clip(int(round(poly_z[i])), 0, Z - 1),
+            np.clip(int(round(poly_y[i + 1])), 0, Y - 1),
+            np.clip(int(round(poly_z[i + 1])), 0, Z - 1))
+        cookie[rr_e, cc_e] = True
 
     # Intersect cookie with membrane
     cookie_3d = np.broadcast_to(cookie[np.newaxis, :, :], (X, Y, Z))

@@ -207,7 +207,7 @@ def resolve_checks(only_arg):
         return None
 
     # Build phase -> IDs from registry
-    phase_checks: dict[str, set[str]] = {}
+    phase_checks = {}
     for defn in _REGISTRY:
         phase_checks.setdefault(defn.phase, set()).add(defn.check_id)
 

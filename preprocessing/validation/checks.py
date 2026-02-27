@@ -1103,12 +1103,18 @@ def _load_simnibs_resampled(ctx):
     labels_cache = val_dir / "simnibs_labels.nii.gz"
     sdf_cache = val_dir / "simnibs_sdf.nii.gz"
 
+    cache_valid = False
     if sdf_cache.exists() and labels_cache.exists():
-        labels = np.asarray(
-            nib.load(str(labels_cache)).dataobj, dtype=np.int16)
-        sdf = np.asarray(
-            nib.load(str(sdf_cache)).dataobj, dtype=np.float32)
-    else:
+        cached_img = nib.load(str(labels_cache))
+        if (cached_img.shape == grid_shape
+                and np.allclose(cached_img.affine, grid_affine, atol=1e-4)):
+            labels = np.asarray(cached_img.dataobj, dtype=np.int16)
+            sdf = np.asarray(
+                nib.load(str(sdf_cache)).dataobj, dtype=np.float32)
+            cache_valid = True
+        else:
+            print(f"  SimNIBS cache stale (shape/affine mismatch), recomputing")
+    if not cache_valid:
         path = validation_dir(subject) / "final_tissues.nii.gz"
         img = nib.load(str(path))
         data = np.asarray(img.dataobj, dtype=np.int16)
