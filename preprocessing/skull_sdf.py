@@ -35,7 +35,14 @@ from scipy.ndimage import (
 )
 
 from preprocessing.profiling import step
-from preprocessing.utils import PROFILES, processed_dir, raw_dir, resample_to_grid
+from preprocessing.utils import (
+    PROFILES,
+    add_grid_args,
+    processed_dir,
+    raw_dir,
+    resample_to_grid,
+    resolve_grid_args,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -46,21 +53,7 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="Construct skull SDF via T2w-guided growth from brain mask."
     )
-    parser.add_argument("--subject", required=True, help="HCP subject ID")
-
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument(
-        "--profile",
-        choices=list(PROFILES.keys()),
-        help="Named profile (default: debug)",
-    )
-    group.add_argument("--dx", type=float, help="Grid spacing in mm (custom)")
-
-    parser.add_argument(
-        "--grid-size",
-        type=int,
-        help="Grid size N (required with --dx, ignored with --profile)",
-    )
+    add_grid_args(parser)
     parser.add_argument(
         "--bone-z",
         type=float,
@@ -105,18 +98,7 @@ def parse_args(argv=None):
     )
 
     args = parser.parse_args(argv)
-
-    if args.profile is None and args.dx is None:
-        args.profile = "debug"
-
-    if args.profile is not None:
-        args.N, args.dx = PROFILES[args.profile]
-    else:
-        if args.grid_size is None:
-            parser.error("--grid-size is required when using --dx")
-        args.N = args.grid_size
-        args.profile = f"custom_{args.N}_{args.dx}"
-
+    resolve_grid_args(args, parser)
     return args
 
 

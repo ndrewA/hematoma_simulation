@@ -18,7 +18,7 @@ import importlib
 import sys
 
 from preprocessing.profiling import step
-from preprocessing.utils import PROFILES
+from preprocessing.utils import PROFILES, add_grid_args, resolve_grid_args
 
 
 STEPS = [
@@ -37,38 +37,13 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="Run all preprocessing steps in sequence."
     )
-    parser.add_argument("--subject", required=True, help="HCP subject ID")
-
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument(
-        "--profile",
-        choices=list(PROFILES.keys()),
-        help="Named profile (default: debug)",
-    )
-    group.add_argument("--dx", type=float, help="Grid spacing in mm (custom)")
-
-    parser.add_argument(
-        "--grid-size", type=int,
-        help="Grid size N (required with --dx, ignored with --profile)",
-    )
+    add_grid_args(parser)
     parser.add_argument(
         "--skip-validation", action="store_true",
         help="Skip the cross-cutting validation step",
     )
-
     args = parser.parse_args(argv)
-
-    if args.profile is None and args.dx is None:
-        args.profile = "debug"
-
-    if args.profile is not None:
-        args.N, args.dx = PROFILES[args.profile]
-    else:
-        if args.grid_size is None:
-            parser.error("--grid-size is required when using --dx")
-        args.N = args.grid_size
-        args.profile = f"custom_{args.N}_{args.dx}"
-
+    resolve_grid_args(args, parser)
     return args
 
 

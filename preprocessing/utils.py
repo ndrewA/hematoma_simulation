@@ -15,6 +15,47 @@ from scipy.ndimage import affine_transform
 # ---------------------------------------------------------------------------
 PROFILES = {"debug": (128, 2.0), "dev": (256, 1.0), "prod": (512, 0.5)}
 
+# ---------------------------------------------------------------------------
+# FreeSurfer LUT size: covers FS labels 0..2035 (max = ctx-rh-insula = 2035)
+# ---------------------------------------------------------------------------
+FS_LUT_SIZE = 2036
+
+
+# ---------------------------------------------------------------------------
+# Common CLI argument helpers
+# ---------------------------------------------------------------------------
+def add_grid_args(parser):
+    """Add --subject, --profile, --dx, --grid-size to an argparse parser."""
+    parser.add_argument("--subject", required=True, help="HCP subject ID")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--profile",
+        choices=list(PROFILES.keys()),
+        help="Named profile (default: debug)",
+    )
+    group.add_argument("--dx", type=float, help="Grid spacing in mm (custom)")
+    parser.add_argument(
+        "--grid-size", type=int,
+        help="Grid size N (required with --dx, ignored with --profile)",
+    )
+
+
+def resolve_grid_args(args, parser):
+    """Resolve N, dx, profile from parsed --profile/--dx/--grid-size.
+
+    Modifies args in place, setting args.N, args.dx, and args.profile.
+    """
+    if args.profile is None and args.dx is None:
+        args.profile = "debug"
+
+    if args.profile is not None:
+        args.N, args.dx = PROFILES[args.profile]
+    else:
+        if args.grid_size is None:
+            parser.error("--grid-size is required when using --dx")
+        args.N = args.grid_size
+        args.profile = f"custom_{args.N}_{args.dx}"
+
 
 # ---------------------------------------------------------------------------
 # Grid affine construction
@@ -38,7 +79,7 @@ def build_grid_affine(N, dx_mm):
 # Slab-based resampling
 # ---------------------------------------------------------------------------
 def resample_to_grid(source, grid_affine, grid_shape, order=0, cval=0.0,
-                     dtype=None, slab_size=32):
+                     dtype=None):
     """Resample a volume onto the simulation grid.
 
     Uses scipy.ndimage.affine_transform (single C call) for the
@@ -58,8 +99,6 @@ def resample_to_grid(source, grid_affine, grid_shape, order=0, cval=0.0,
         Fill value for out-of-bounds voxels.
     dtype : numpy dtype or None
         Output dtype. If None, inferred from source.
-    slab_size : int
-        Unused (kept for backward compatibility).
 
     Returns
     -------

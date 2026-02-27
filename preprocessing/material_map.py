@@ -11,7 +11,13 @@ import sys
 import nibabel as nib
 import numpy as np
 
-from preprocessing.utils import PROFILES, processed_dir
+from preprocessing.utils import (
+    FS_LUT_SIZE,
+    PROFILES,
+    add_grid_args,
+    processed_dir,
+    resolve_grid_args,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -106,7 +112,6 @@ FALLBACK_MAP.update({fs: 2 for fs in range(64, 72)})      # Right gyral labels
 # ---------------------------------------------------------------------------
 # LUT parameters
 # ---------------------------------------------------------------------------
-LUT_SIZE = 2036       # covers FS labels 0..2035 (max = ctx-rh-insula = 2035)
 _SENTINEL = 128       # marks unmapped LUT slots (must be outside 0-11 and 255)
 
 
@@ -118,16 +123,16 @@ def build_lut():
 
     Returns
     -------
-    lut : ndarray, uint8, shape (LUT_SIZE,)
+    lut : ndarray, uint8, shape (FS_LUT_SIZE,)
     direct_labels : set of int
         The FS labels covered by DIRECT_MAP (for warning logic).
     """
-    lut = np.full(LUT_SIZE, _SENTINEL, dtype=np.uint8)
+    lut = np.full(FS_LUT_SIZE, _SENTINEL, dtype=np.uint8)
     for fs_label, u8_class in DIRECT_MAP.items():
-        if fs_label < LUT_SIZE:
+        if fs_label < FS_LUT_SIZE:
             lut[fs_label] = u8_class
     for fs_label, u8_class in FALLBACK_MAP.items():
-        if fs_label < LUT_SIZE:
+        if fs_label < FS_LUT_SIZE:
             lut[fs_label] = u8_class
     return lut, set(DIRECT_MAP.keys())
 
@@ -138,7 +143,7 @@ def apply_mapping(fs_labels, lut):
     Parameters
     ----------
     fs_labels : ndarray, int16
-    lut : ndarray, uint8, shape (LUT_SIZE,)
+    lut : ndarray, uint8, shape (FS_LUT_SIZE,)
 
     Returns
     -------
@@ -149,11 +154,11 @@ def apply_mapping(fs_labels, lut):
         n_neg = int(np.count_nonzero(fs_labels < 0))
         print(f"WARNING: {n_neg} voxels have negative FS labels; clamping to 0")
 
-    # Out-of-range mask (labels >= LUT_SIZE)
-    oor_mask = fs_labels >= LUT_SIZE
+    # Out-of-range mask (labels >= FS_LUT_SIZE)
+    oor_mask = fs_labels >= FS_LUT_SIZE
 
     # Safe indexing: clip to valid LUT range
-    labels_safe = np.clip(fs_labels, 0, LUT_SIZE - 1)
+    labels_safe = np.clip(fs_labels, 0, FS_LUT_SIZE - 1)
     material = lut[labels_safe]
 
     # Fix out-of-range voxels: cortical GM fallback
@@ -174,7 +179,8 @@ def collect_warnings(fs_labels, direct_labels):
     fs_labels : ndarray, int16
     direct_labels : set of int
     """
-    unique_labels = np.unique(fs_labels)
+    unique_labels, label_counts = np.unique(fs_labels, return_counts=True)
+    counts_by_label = dict(zip(unique_labels.tolist(), label_counts.tolist()))
     fallback_labels = set(FALLBACK_MAP.keys())
 
     fallback_hits = []
@@ -186,7 +192,7 @@ def collect_warnings(fs_labels, direct_labels):
             continue
         if lab < 0:
             continue  # already warned in apply_mapping; mapped to u8=0 via clamp
-        count = int(np.count_nonzero(fs_labels == lab))
+        count = counts_by_label[lab]
         if lab in fallback_labels:
             fallback_hits.append((lab, count, FALLBACK_MAP[lab]))
         else:
@@ -212,34 +218,9 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="Remap FreeSurfer labels to simulation material classes."
     )
-    parser.add_argument("--subject", required=True, help="HCP subject ID")
-
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument(
-        "--profile",
-        choices=list(PROFILES.keys()),
-        help="Named profile (default: debug)",
-    )
-    group.add_argument("--dx", type=float, help="Grid spacing in mm (custom)")
-
-    parser.add_argument(
-        "--grid-size", type=int,
-        help="Grid size N (required with --dx, ignored with --profile)",
-    )
-
+    add_grid_args(parser)
     args = parser.parse_args(argv)
-
-    if args.profile is None and args.dx is None:
-        args.profile = "debug"
-
-    if args.profile is not None:
-        args.N, args.dx = PROFILES[args.profile]
-    else:
-        if args.grid_size is None:
-            parser.error("--grid-size is required when using --dx")
-        args.N = args.grid_size
-        args.profile = f"custom_{args.N}_{args.dx}"
-
+    resolve_grid_args(args, parser)
     return args
 
 

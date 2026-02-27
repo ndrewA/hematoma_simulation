@@ -27,8 +27,15 @@ from scipy.spatial import cKDTree
 from skimage.draw import line as draw_line
 
 from preprocessing.profiling import step
-from preprocessing.utils import PROFILES, build_ball, processed_dir, raw_dir
-from preprocessing.material_map import CLASS_NAMES, print_census
+from preprocessing.utils import (
+    FS_LUT_SIZE,
+    PROFILES,
+    add_grid_args,
+    processed_dir,
+    raw_dir,
+    resolve_grid_args,
+)
+from preprocessing.material_map import CLASS_NAMES, print_census, save_material_map
 
 
 # ---------------------------------------------------------------------------
@@ -45,8 +52,6 @@ RIGHT_CEREBRAL_LABELS = frozenset(
 RIGHT_CEREBRAL_RANGE = (2001, 2035)
 
 CC_LABELS = frozenset({192, 251, 252, 253, 254, 255})
-
-_FS_LUT_SIZE = 2036  # matches material_map.LUT_SIZE
 
 # Kayalioglu falx height targets at CC landmarks (mm)
 _H_GENU = 21.3
@@ -75,17 +80,17 @@ _TENT_NOTCH_AR = 1.8
 
 def _build_fs_luts():
     """Build boolean LUTs for left/right cerebral and CC FreeSurfer labels."""
-    left_lut = np.zeros(_FS_LUT_SIZE, dtype=bool)
+    left_lut = np.zeros(FS_LUT_SIZE, dtype=bool)
     for lab in LEFT_CEREBRAL_LABELS:
         left_lut[lab] = True
     left_lut[LEFT_CEREBRAL_RANGE[0]:LEFT_CEREBRAL_RANGE[1] + 1] = True
 
-    right_lut = np.zeros(_FS_LUT_SIZE, dtype=bool)
+    right_lut = np.zeros(FS_LUT_SIZE, dtype=bool)
     for lab in RIGHT_CEREBRAL_LABELS:
         right_lut[lab] = True
     right_lut[RIGHT_CEREBRAL_RANGE[0]:RIGHT_CEREBRAL_RANGE[1] + 1] = True
 
-    cc_lut = np.zeros(_FS_LUT_SIZE, dtype=bool)
+    cc_lut = np.zeros(FS_LUT_SIZE, dtype=bool)
     for lab in CC_LABELS:
         cc_lut[lab] = True
 
@@ -195,20 +200,7 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="Reconstruct falx cerebri and tentorium cerebelli."
     )
-    parser.add_argument("--subject", required=True, help="HCP subject ID")
-
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument(
-        "--profile",
-        choices=list(PROFILES.keys()),
-        help="Named profile (default: debug)",
-    )
-    group.add_argument("--dx", type=float, help="Grid spacing in mm (custom)")
-
-    parser.add_argument(
-        "--grid-size", type=int,
-        help="Grid size N (required with --dx, ignored with --profile)",
-    )
+    add_grid_args(parser)
     parser.add_argument(
         "--notch-radius", type=float, default=5.0,
         help="Tentorial notch exclusion radius in mm (default: 5.0)",
@@ -223,18 +215,7 @@ def parse_args(argv=None):
     )
 
     args = parser.parse_args(argv)
-
-    if args.profile is None and args.dx is None:
-        args.profile = "debug"
-
-    if args.profile is not None:
-        args.N, args.dx = PROFILES[args.profile]
-    else:
-        if args.grid_size is None:
-            parser.error("--grid-size is required when using --dx")
-        args.N = args.grid_size
-        args.profile = f"custom_{args.N}_{args.dx}"
-
+    resolve_grid_args(args, parser)
     return args
 
 
@@ -276,15 +257,6 @@ def load_inputs(out_dir):
     return mat, fs, skull_sdf, affine, dx_mm
 
 
-def save_material_map(out_dir, mat, affine):
-    """Overwrite material_map.nii.gz as uint8."""
-    img = nib.Nifti1Image(mat, affine)
-    img.header.set_data_dtype(np.uint8)
-    path = out_dir / "material_map.nii.gz"
-    nib.save(img, str(path))
-    print(f"Saved {path}  shape={mat.shape}  dtype={mat.dtype}")
-
-
 # ---------------------------------------------------------------------------
 # Core algorithm
 # ---------------------------------------------------------------------------
@@ -294,7 +266,7 @@ def classify_hemispheres(fs, left_lut, right_lut):
     Returns (left_mask, right_mask) as boolean arrays.
     Uses pre-built LUTs for O(1) per-voxel lookup instead of np.isin.
     """
-    fs_safe = np.clip(fs, 0, _FS_LUT_SIZE - 1)
+    fs_safe = np.clip(fs, 0, FS_LUT_SIZE - 1)
     left_mask = left_lut[fs_safe]
     right_mask = right_lut[fs_safe]
     return left_mask, right_mask
@@ -345,7 +317,7 @@ def reconstruct_falx(mat, fs, skull_sdf, dx_mm, crop_slices,
     X, Y, Z = membrane.shape
 
     # CC landmark y-positions from FS sub-region labels
-    fs_safe = np.clip(fs_crop, 0, _FS_LUT_SIZE - 1)
+    fs_safe = np.clip(fs_crop, 0, FS_LUT_SIZE - 1)
     cc_landmarks = {}
     for name, label, height in [
         ("splenium", _CC_SPLENIUM, _H_SPLENIUM),
@@ -986,47 +958,6 @@ def print_thickness_estimate(falx_mask, tent_mask, dx_mm):
             print(f"  {name}: < 1 voxel thick  (all surface, {n} voxels)")
 
 
-def check_tentorial_notch(mat, dx_mm):
-    """Verify the tentorial notch is open (CSF adjacent to brainstem)."""
-    print("\n" + "=" * 60)
-    print("Tentorial Notch Check")
-    print("=" * 60)
-
-    brainstem = (mat == 6)
-    if not brainstem.any():
-        print("  Skipped: no brainstem voxels")
-        return
-
-    # Find brainstem z-range, select upper-third slice
-    z_indices = np.where(brainstem.any(axis=(0, 1)))[0]
-    z_min, z_max = int(z_indices.min()), int(z_indices.max())
-    z_upper = z_min + 2 * (z_max - z_min) // 3
-
-    # Check for CSF face-adjacent to brainstem in that slice
-    bs_slice = brainstem[:, :, z_upper]
-    csf_slice = (mat[:, :, z_upper] == 8)
-
-    # 4-connected neighbors in 2D
-    n_adjacent = 0
-    if bs_slice.any() and csf_slice.any():
-        # Shift brainstem mask in 4 directions and check overlap with CSF
-        for di, dj in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-            shifted = np.zeros_like(bs_slice)
-            si = slice(max(0, di), min(bs_slice.shape[0], bs_slice.shape[0] + di) or None)
-            di_src = slice(max(0, -di), min(bs_slice.shape[0], bs_slice.shape[0] - di) or None)
-            sj = slice(max(0, dj), min(bs_slice.shape[1], bs_slice.shape[1] + dj) or None)
-            dj_src = slice(max(0, -dj), min(bs_slice.shape[1], bs_slice.shape[1] - dj) or None)
-            shifted[si, sj] = bs_slice[di_src, dj_src]
-            n_adjacent += int(np.count_nonzero(shifted & csf_slice))
-
-    print(f"  Upper-third slice z={z_upper}: "
-          f"{n_adjacent} CSF voxels face-adjacent to brainstem")
-    if n_adjacent == 0:
-        print("  WARNING: tentorial notch may be occluded (0 adjacent CSF)")
-    else:
-        print("  OK: tentorial notch appears open")
-
-
 def check_medial_wall_proximity(falx_mask, subject, dx_mm, affine):
     """Check falx proximity to pial surfaces (optional).
 
@@ -1164,7 +1095,6 @@ def main(argv=None):
     print_volumes(n_falx, n_tent, n_overlap, n_total, dx_mm)
     print_membrane_continuity(falx_mask, tent_mask, dx_mm)
     print_thickness_estimate(falx_mask, tent_mask, dx_mm)
-    check_tentorial_notch(mat, dx_mm)
     print_junction_thickness(falx_mask, tent_mask, dx_mm, mat)
     check_medial_wall_proximity(falx_mask, args.subject, dx_mm, affine)
     print_csf_components(mat, dx_mm)

@@ -655,8 +655,10 @@ def generate_fig6(verts_ours, verts_sim, d_o2s, d_s2o,
 
     ax = axes[1, 2]
     thresholds = np.linspace(0, 15, 300)
-    cdf_o2s = [(d_o2s <= t).sum() / len(d_o2s) * 100 for t in thresholds]
-    cdf_s2o = [(d_s2o <= t).sum() / len(d_s2o) * 100 for t in thresholds]
+    d_o2s_sorted = np.sort(d_o2s)
+    d_s2o_sorted = np.sort(d_s2o)
+    cdf_o2s = np.searchsorted(d_o2s_sorted, thresholds) / len(d_o2s) * 100
+    cdf_s2o = np.searchsorted(d_s2o_sorted, thresholds) / len(d_s2o) * 100
     ax.plot(thresholds, cdf_o2s, label="Ours\u2192SimNIBS", linewidth=2)
     ax.plot(thresholds, cdf_s2o, label="SimNIBS\u2192Ours", linewidth=2)
     ax.axhline(95, color="gray", linestyle="--", alpha=0.5)

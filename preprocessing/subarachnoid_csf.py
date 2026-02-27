@@ -15,8 +15,8 @@ import numpy as np
 from scipy.ndimage import distance_transform_edt, label as cc_label
 
 from preprocessing.profiling import step
-from preprocessing.utils import PROFILES, processed_dir
-from preprocessing.material_map import CLASS_NAMES, print_census
+from preprocessing.utils import PROFILES, add_grid_args, processed_dir, resolve_grid_args
+from preprocessing.material_map import CLASS_NAMES, print_census, save_material_map
 
 
 # ---------------------------------------------------------------------------
@@ -27,34 +27,9 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="Fill subarachnoid CSF (sulcal + shell) in the material map."
     )
-    parser.add_argument("--subject", required=True, help="HCP subject ID")
-
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument(
-        "--profile",
-        choices=list(PROFILES.keys()),
-        help="Named profile (default: debug)",
-    )
-    group.add_argument("--dx", type=float, help="Grid spacing in mm (custom)")
-
-    parser.add_argument(
-        "--grid-size", type=int,
-        help="Grid size N (required with --dx, ignored with --profile)",
-    )
-
+    add_grid_args(parser)
     args = parser.parse_args(argv)
-
-    if args.profile is None and args.dx is None:
-        args.profile = "debug"
-
-    if args.profile is not None:
-        args.N, args.dx = PROFILES[args.profile]
-    else:
-        if args.grid_size is None:
-            parser.error("--grid-size is required when using --dx")
-        args.N = args.grid_size
-        args.profile = f"custom_{args.N}_{args.dx}"
-
+    resolve_grid_args(args, parser)
     return args
 
 
@@ -94,15 +69,6 @@ def load_inputs(out_dir):
     )
 
     return mat, sdf, brain, affine, dx_mm
-
-
-def save_material_map(out_dir, mat, affine):
-    """Overwrite material_map.nii.gz as uint8."""
-    img = nib.Nifti1Image(mat, affine)
-    img.header.set_data_dtype(np.uint8)
-    path = out_dir / "material_map.nii.gz"
-    nib.save(img, str(path))
-    print(f"Saved {path}  shape={mat.shape}  dtype={mat.dtype}")
 
 
 # ---------------------------------------------------------------------------

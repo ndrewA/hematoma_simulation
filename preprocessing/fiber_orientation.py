@@ -16,6 +16,7 @@ import nibabel as nib
 import numpy as np
 
 from preprocessing.profiling import step
+from preprocessing.utils import FS_LUT_SIZE
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -33,12 +34,10 @@ _ANISO_LABELS = frozenset({
     16, 75, 76,                         # Brainstem
 })
 
-_FS_LUT_SIZE = 2036  # covers FS labels 0..2035
-
 
 def _build_aniso_lut():
     """Boolean LUT (size 2036) for anisotropic FS labels."""
-    lut = np.zeros(_FS_LUT_SIZE, dtype=bool)
+    lut = np.zeros(FS_LUT_SIZE, dtype=bool)
     for lab in _ANISO_LABELS:
         lut[lab] = True
     return lut
@@ -179,7 +178,7 @@ def build_wm_mask(diff_affine, fs_data, fs_affine, shape, aniso_lut):
     del fi, fj, fk
 
     # Map through aniso LUT
-    fs_safe = np.clip(fs_labels, 0, _FS_LUT_SIZE - 1)
+    fs_safe = np.clip(fs_labels, 0, FS_LUT_SIZE - 1)
     is_aniso = aniso_lut[fs_safe]
 
     return is_aniso, fs_labels

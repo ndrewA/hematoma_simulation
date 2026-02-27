@@ -18,10 +18,12 @@ import numpy as np
 from preprocessing.profiling import step
 from preprocessing.utils import (
     PROFILES,
+    add_grid_args,
     build_grid_affine,
     processed_dir,
     raw_dir,
     resample_to_grid,
+    resolve_grid_args,
 )
 
 
@@ -34,36 +36,9 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="Resample HCP source volumes onto the simulation grid."
     )
-    parser.add_argument("--subject", required=True, help="HCP subject ID")
-
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument(
-        "--profile",
-        choices=list(PROFILES.keys()),
-        help="Named profile (default: debug)",
-    )
-    group.add_argument("--dx", type=float, help="Grid spacing in mm (custom)")
-
-    parser.add_argument(
-        "--grid-size", type=int,
-        help="Grid size N (required with --dx, ignored with --profile)",
-    )
-
+    add_grid_args(parser)
     args = parser.parse_args(argv)
-
-    # Default to debug profile if neither --profile nor --dx given
-    if args.profile is None and args.dx is None:
-        args.profile = "debug"
-
-    # Resolve N and dx
-    if args.profile is not None:
-        args.N, args.dx = PROFILES[args.profile]
-    else:
-        if args.grid_size is None:
-            parser.error("--grid-size is required when using --dx")
-        args.N = args.grid_size
-        args.profile = f"custom_{args.N}_{args.dx}"
-
+    resolve_grid_args(args, parser)
     return args
 
 

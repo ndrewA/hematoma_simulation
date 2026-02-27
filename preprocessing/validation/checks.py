@@ -52,19 +52,18 @@ _REGISTRY_BY_ID: dict[str, CheckDef] = {}
 def _load_fs_data(ctx):
     """Load FS labels, compute CC boundary.  Cached as 'fs_data'."""
     import nibabel as nib
-    from preprocessing.dural_membrane import (
-        _build_fs_luts, _FS_LUT_SIZE, CC_LABELS,
-    )
+    from preprocessing.dural_membrane import _build_fs_luts, CC_LABELS
+    from preprocessing.utils import FS_LUT_SIZE
 
     fs_img = nib.load(str(ctx.paths["fs"]))
     fs = np.asarray(fs_img.dataobj, dtype=np.int16)
     del fs_img
 
     left_lut, right_lut, _ = _build_fs_luts()
-    fs_safe = np.clip(fs, 0, _FS_LUT_SIZE - 1)
+    fs_safe = np.clip(fs, 0, FS_LUT_SIZE - 1)
     del fs
 
-    cc_lut = np.zeros(_FS_LUT_SIZE, dtype=bool)
+    cc_lut = np.zeros(FS_LUT_SIZE, dtype=bool)
     for lab in CC_LABELS:
         cc_lut[lab] = True
     cc_mask = cc_lut[fs_safe]
@@ -808,8 +807,6 @@ def _compute_falx_cc_heights(ctx):
     Returns dict with keys 'body_mm', 'genu_mm', 'body_y', 'genu_y'.
     Cached as 'falx_cc_heights'.
     """
-    from preprocessing.dural_membrane import _FS_LUT_SIZE
-
     mat = ctx.mat
     dx = ctx.dx
 
