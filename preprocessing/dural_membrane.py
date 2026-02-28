@@ -76,9 +76,9 @@ _NOTCH_ASPECT_RATIO = 41.8 / 96.9
 # Arrambide-Garza 2022 (n=60): NL 55.6mm / MNW 31.3mm ≈ 1.78
 _TENT_NOTCH_AR = 1.8
 
-# Crista galli detection thresholds
-_CRISTA_MARGIN_VOX = 5       # voxels: margin from genu/tip to avoid edge artifacts
-_CRISTA_MIN_HEIGHT_MM = 15   # mm: minimum membrane height to qualify as crista
+# Medial orbitofrontal cortex (gyrus rectus) FS labels for crista galli
+_MOF_LEFT = 1014
+_MOF_RIGHT = 2014
 
 
 @dataclass
@@ -403,53 +403,29 @@ def classify_hemispheres(fs, left_lut, right_lut):
     return left_mask, right_mask
 
 
-def _detect_crista_galli(skull_crop, mid_x, genu_y, mem_y_max,
-                         mem_exists, mem_top_z, mem_bot_z, dx_mm, Z,
-                         cc_landmarks):
-    """Find crista galli: lowest skull floor anterior to genu with tall membrane.
+def _detect_crista_galli(fs_crop, mid_x, genu_y):
+    """Find crista galli via inferior extent of medial orbitofrontal cortex.
 
-    Returns (crista_y, crista_z).  Falls back to membrane tip if detection
-    fails or insufficient CC landmarks are available.
+    The gyrus rectus (medial orbitofrontal, FS labels 1014/2014) sits
+    directly on the cribriform plate adjacent to the crista galli.  Its
+    most inferior voxel near the midline is a reliable proxy for the
+    anterior falx attachment point.
+
+    Returns (crista_y, crista_z).
     """
-    crista_y = None
+    band = fs_crop[mid_x - 2 : mid_x + 3]
+    mof = (band == _MOF_LEFT) | (band == _MOF_RIGHT)
+    mof_yz = mof.any(axis=0)  # project to sagittal plane
+    ys, zs = np.where(mof_yz)
 
-    if len(cc_landmarks) >= 3:
-        Y = len(mem_exists)
-        skull_mid = skull_crop[mid_x]
-        skull_floor_z = np.full(Y, -1, dtype=int)
+    anterior = ys > genu_y
+    assert anterior.any(), (
+        "No medial orbitofrontal cortex (1014/2014) found anterior to genu")
+    ys, zs = ys[anterior], zs[anterior]
 
-        # Vectorized skull floor: first z where SDF < 0 for each y
-        slab = skull_mid[genu_y:mem_y_max + 1]   # (n_y, Z)
-        has_neg = slab < 0
-        any_neg = has_neg.any(axis=1)
-        first_neg = np.argmax(has_neg, axis=1)    # first True per row
-        slab_valid = any_neg & mem_exists[genu_y:mem_y_max + 1]
-        skull_floor_z[genu_y:mem_y_max + 1] = np.where(
-            slab_valid, first_neg, -1)
-
-        floor_valid = skull_floor_z > 0
-        search_start = genu_y + _CRISTA_MARGIN_VOX
-        search_end = mem_y_max - _CRISTA_MARGIN_VOX
-        mem_h = (mem_top_z - mem_bot_z).astype(float) * dx_mm
-        candidates = (floor_valid
-                      & (mem_h >= _CRISTA_MIN_HEIGHT_MM)
-                      & (np.arange(Y) >= search_start)
-                      & (np.arange(Y) <= search_end))
-        candidate_ys = np.where(candidates)[0]
-        if len(candidate_ys) > 0:
-            crista_y = int(candidate_ys[np.argmin(skull_floor_z[candidate_ys])])
-
-        if crista_y is not None:
-            crista_z = skull_floor_z[crista_y]
-            print(f"  Crista galli: y={crista_y}, z={crista_z}")
-            return crista_y, crista_z
-
-    # Fallback: use anterior membrane tip
-    crista_y = mem_y_max
-    crista_z = mem_bot_z[crista_y]
-    reason = ("insufficient CC landmarks" if len(cc_landmarks) < 3
-              else "not found in search")
-    print(f"  Crista galli {reason}, using membrane tip y={crista_y}")
+    idx = int(np.argmin(zs))
+    crista_y, crista_z = int(ys[idx]), int(zs[idx])
+    print(f"  Crista galli (medial orbitofrontal): y={crista_y}, z={crista_z}")
     return crista_y, crista_z
 
 
@@ -692,7 +668,7 @@ def _compute_midplane_membrane(fs_crop, skull_crop, dx_mm, thickness_mm):
 
 def _detect_falx_geometry(membrane, skull_crop, tent_crop,
                           cc_landmarks, cc_top_z, cc_exists,
-                          dx_mm):
+                          dx_mm, fs_crop):
     """Detect edge profiles, anchor, junction, and crista galli.
 
     Returns a populated _FalxGeometry with all landmark data.
@@ -745,9 +721,7 @@ def _detect_falx_geometry(membrane, skull_crop, tent_crop,
     print(f"  Anchor (midline tent end): y={anchor_y}, z={anchor_z:.0f}")
 
     # Crista galli
-    crista_y, crista_z = _detect_crista_galli(
-        skull_crop, mid_x, genu_y, mem_y_max,
-        mem_exists, mem_top_z, mem_bot_z, dx_mm, Z, cc_landmarks)
+    crista_y, crista_z = _detect_crista_galli(fs_crop, mid_x, genu_y)
 
     return _FalxGeometry(
         mem_top_z=mem_top_z, mem_bot_z=mem_bot_z, mem_exists=mem_exists,
@@ -840,13 +814,12 @@ def reconstruct_falx(mat, fs, skull_sdf, dx_mm, crop_slices,
     # Phase 1: EDT pair → midplane membrane + CC landmarks
     membrane, n_membrane, cc_landmarks, cc_top_z, cc_exists = \
         _compute_midplane_membrane(fs_crop, skull_crop, dx_mm, thickness_mm)
-    del fs_crop
 
     # Phase 2: Edge profiles, anchor, crista galli → geometry bundle
     geo = _detect_falx_geometry(
         membrane, skull_crop, tent_crop,
-        cc_landmarks, cc_top_z, cc_exists, dx_mm)
-    del skull_crop
+        cc_landmarks, cc_top_z, cc_exists, dx_mm, fs_crop)
+    del fs_crop, skull_crop
 
     # Phase 3: Free edge curve (PCHIP + Bezier)
     pchip_ys, pchip_zs, genu_ctrl_z = _build_free_edge_controls(
