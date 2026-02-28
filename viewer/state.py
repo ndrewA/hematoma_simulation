@@ -175,3 +175,13 @@ class ViewState:
     def set_slice_index(self, panel, val):
         axis = self.PANEL_AXIS[panel]
         self.crosshair[axis] = max(0, min(self.N - 1, val))
+
+    def widget_camera(self):
+        """Camera for the 3D crosshair widget — centered on cube, framed to fit."""
+        cam = OrbitalCamera()
+        cam.azimuth = self.camera.azimuth
+        cam.elevation = self.camera.elevation
+        cam.fov_deg = self.camera.fov_deg
+        cam.center = (self.N / 2.0, self.N / 2.0, self.N / 2.0)
+        cam.distance = self.N * 2.0
+        return cam

@@ -3,7 +3,7 @@
 import math
 import numpy as np
 import taichi as ti
-from viewer.state import ViewState, OrbitalCamera, LayoutManager, LayoutMode
+from viewer.state import ViewState, LayoutMode
 from viewer.data import ViewerData
 from viewer.layers import Layer, LayerType
 from viewer.colormaps import (
@@ -259,7 +259,7 @@ def _render_3d(state, data, buf, panel, cat_lut, group_opacity):
 
 
 def _render_crosshair_widget(state, buf, panel):
-    cam = widget_camera(state)
+    cam = state.widget_camera()
     basis = cam.basis()
     if basis is None:
         return
@@ -278,17 +278,6 @@ def _render_crosshair_widget(state, buf, panel):
         float(state.crosshair[0]), float(state.crosshair[1]),
         float(state.crosshair[2]),
     )
-
-
-def widget_camera(state):
-    """Camera for the 3D crosshair widget — centered on cube, framed to fit."""
-    cam = OrbitalCamera()
-    cam.azimuth = state.camera.azimuth
-    cam.elevation = state.camera.elevation
-    cam.fov_deg = state.camera.fov_deg
-    cam.center = (state.N / 2.0, state.N / 2.0, state.N / 2.0)
-    cam.distance = state.N * 2.0
-    return cam
 
 
 def _draw_gui(window, state, layers):

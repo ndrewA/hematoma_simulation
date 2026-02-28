@@ -1,17 +1,11 @@
 """NIfTI data loading into Taichi fields."""
 
 import json
-from pathlib import Path
 
 import nibabel as nib
 import numpy as np
 import taichi as ti
 
-# Reuse path helpers from preprocessing
-import sys
-_project_root = str(Path(__file__).resolve().parent.parent)
-if _project_root not in sys.path:
-    sys.path.append(_project_root)
 from preprocessing.utils import (
     PROFILES, processed_dir, raw_dir, build_grid_affine, resample_to_grid,
 )

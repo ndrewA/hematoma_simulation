@@ -64,8 +64,7 @@ def _apply_drag(state, mouse, win_w, win_h):
         state.panel_pan[panel] = (pan_x + dx_px / scale, pan_y + dy_px / scale)
 
     elif drag.type == DragType.PLANE_DRAG:
-        from viewer.app import widget_camera
-        _apply_plane_drag(state, mouse, prev, widget_camera(state), win_w, win_h)
+        _apply_plane_drag(state, mouse, prev, state.widget_camera(), win_w, win_h)
 
     drag.prev = mouse
 
@@ -88,8 +87,7 @@ def _handle_mouse(window, state, mouse, hovered, mx, my, win_w, win_h):
     # No active drag — check for new interactions
     if lmb:
         if hovered == 3 and state.layout_mode == LayoutMode.SLICES:
-            from viewer.app import widget_camera
-            axis = _pick_plane(state, mx, my, widget_camera(state))
+            axis = _pick_plane(state, mx, my, state.widget_camera())
             if axis >= 0:
                 state.drag.start(DragType.PLANE_DRAG, mouse, lmb=True,
                                  axis=axis, pos=float(state.crosshair[axis]))
