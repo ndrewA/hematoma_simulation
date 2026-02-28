@@ -12,6 +12,7 @@ import argparse
 import json
 import math
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 
 import edt as _edt
 import nibabel as nib
@@ -78,6 +79,36 @@ _TENT_NOTCH_AR = 1.8
 # Crista galli detection thresholds
 _CRISTA_MARGIN_VOX = 5       # voxels: margin from genu/tip to avoid edge artifacts
 _CRISTA_MIN_HEIGHT_MM = 15   # mm: minimum membrane height to qualify as crista
+
+
+@dataclass
+class _FalxGeometry:
+    """Sagittal-plane geometry for falx cookie-cutter.
+
+    Bundles the intermediate edge profiles, landmarks, and anchor points
+    detected during falx reconstruction so they can flow between phases
+    without 16+ loose variables.
+    """
+    # Membrane edge profiles (length Y)
+    mem_top_z: np.ndarray
+    mem_bot_z: np.ndarray
+    mem_exists: np.ndarray
+    mem_y_min: int
+    mem_y_max: int
+    # Tentorium edge profiles
+    tent_top_z: np.ndarray
+    tent_exists: np.ndarray
+    # CC landmarks
+    cc_landmarks: dict
+    cc_top_z: np.ndarray
+    cc_exists: np.ndarray
+    # Key points
+    anchor_y: int
+    anchor_z: float
+    crista_y: int
+    crista_z: float
+    genu_y: int
+    mid_x: int
 
 
 def _build_fs_luts():
@@ -386,26 +417,27 @@ def _detect_crista_galli(skull_crop, mid_x, genu_y, mem_y_max,
         Y = len(mem_exists)
         skull_mid = skull_crop[mid_x]
         skull_floor_z = np.full(Y, -1, dtype=int)
-        for y in range(genu_y, mem_y_max + 1):
-            if not mem_exists[y]:
-                continue
-            for z in range(0, Z):
-                if skull_mid[y, z] < 0:
-                    skull_floor_z[y] = z
-                    break
+
+        # Vectorized skull floor: first z where SDF < 0 for each y
+        slab = skull_mid[genu_y:mem_y_max + 1]   # (n_y, Z)
+        has_neg = slab < 0
+        any_neg = has_neg.any(axis=1)
+        first_neg = np.argmax(has_neg, axis=1)    # first True per row
+        slab_valid = any_neg & mem_exists[genu_y:mem_y_max + 1]
+        skull_floor_z[genu_y:mem_y_max + 1] = np.where(
+            slab_valid, first_neg, -1)
 
         floor_valid = skull_floor_z > 0
+        search_start = genu_y + _CRISTA_MARGIN_VOX
         search_end = mem_y_max - _CRISTA_MARGIN_VOX
-        best_floor = Z
-        for y in range(genu_y + _CRISTA_MARGIN_VOX, search_end + 1):
-            if not floor_valid[y]:
-                continue
-            mem_h = (mem_top_z[y] - mem_bot_z[y]) * dx_mm
-            if mem_h < _CRISTA_MIN_HEIGHT_MM:
-                continue
-            if skull_floor_z[y] < best_floor:
-                best_floor = skull_floor_z[y]
-                crista_y = y
+        mem_h = (mem_top_z - mem_bot_z).astype(float) * dx_mm
+        candidates = (floor_valid
+                      & (mem_h >= _CRISTA_MIN_HEIGHT_MM)
+                      & (np.arange(Y) >= search_start)
+                      & (np.arange(Y) <= search_end))
+        candidate_ys = np.where(candidates)[0]
+        if len(candidate_ys) > 0:
+            crista_y = int(candidate_ys[np.argmin(skull_floor_z[candidate_ys])])
 
         if crista_y is not None:
             crista_z = skull_floor_z[crista_y]
@@ -610,28 +642,16 @@ def _solve_bezier_shape(pchip_ys, pchip_zs, genu_y, genu_ctrl_z,
     return inner_ys, inner_zs
 
 
-def reconstruct_falx(mat, fs, skull_sdf, dx_mm, crop_slices,
-                     thickness_mm=1.0, tent_mask=None):
-    """Reconstruct the falx cerebri via PCHIP + Bezier free edge.
+def _compute_midplane_membrane(fs_crop, skull_crop, dx_mm, thickness_mm):
+    """EDT pair on left/right hemispheres → sign-change membrane + CC info.
 
-    Full phi=0 midplane membrane through all intracranial tissue,
-    shaped by a PCHIP-interpolated free edge with Bezier genu-crista
-    segment, using Kayalioglu ratios and Frassanito notch constraint.
-    Rasterized via flood fill.
-
-    Returns falx_mask (boolean).
+    Returns (membrane, n_membrane, cc_landmarks, cc_top_z, cc_exists).
     """
     sampling = (dx_mm, dx_mm, dx_mm)
 
-    # Crop to bounding box
-    fs_crop = fs[crop_slices]
-    skull_crop = skull_sdf[crop_slices]
-
-    # Classify hemispheres on crop
     left_lut, right_lut, cc_lut = _build_fs_luts()
     left_crop, right_crop = classify_hemispheres(fs_crop, left_lut, right_lut)
 
-    # EDT pair on crop (threaded)
     print("Computing EDT for left+right hemispheres (cropped, threaded)...")
     with step("EDT pair (L/R hemispheres)"):
         with ThreadPoolExecutor(max_workers=2) as pool:
@@ -641,7 +661,6 @@ def reconstruct_falx(mat, fs, skull_sdf, dx_mm, crop_slices,
             dist_right = fut_r.result()
     del left_crop, right_crop
 
-    # Signed diff field → full midplane membrane
     phi = dist_left - dist_right
     del dist_left, dist_right
     intracranial = skull_crop < 0
@@ -650,9 +669,8 @@ def reconstruct_falx(mat, fs, skull_sdf, dx_mm, crop_slices,
     print(f"  Full midplane membrane: {n_membrane} voxels")
     del phi, intracranial
 
-    X, Y, Z = membrane.shape
-
     # CC landmark y-positions from FS sub-region labels
+    _, Y, Z = membrane.shape
     fs_safe = np.clip(fs_crop, 0, FS_LUT_SIZE - 1)
     cc_landmarks = {}
     for name, label, height in [
@@ -667,19 +685,31 @@ def reconstruct_falx(mat, fs, skull_sdf, dx_mm, crop_slices,
 
     cc_proj = cc_lut[fs_safe].any(axis=0)
     cc_top_z, _, cc_exists = _get_edges(cc_proj, Y, Z)
-    del fs_crop, fs_safe
+    del fs_safe
 
-    # Membrane and tentorium edges
+    return membrane, n_membrane, cc_landmarks, cc_top_z, cc_exists
+
+
+def _detect_falx_geometry(membrane, skull_crop, tent_crop,
+                          cc_landmarks, cc_top_z, cc_exists,
+                          dx_mm):
+    """Detect edge profiles, anchor, junction, and crista galli.
+
+    Returns a populated _FalxGeometry with all landmark data.
+    """
+    X, Y, Z = membrane.shape
+
+    # Membrane edges
     mem_yz = membrane.any(axis=0)
     mem_top_z, mem_bot_z, mem_exists = _get_edges(mem_yz, Y, Z)
 
+    # Tentorium edges
     tent_top_z = np.full(Y, -1, dtype=int)
     tent_exists = np.zeros(Y, dtype=bool)
-    if tent_mask is not None:
-        tent_crop = tent_mask[crop_slices]
+    if tent_crop is not None:
         tent_yz = tent_crop.any(axis=0)
         tent_top_z, _, tent_exists = _get_edges(tent_yz, Y, Z)
-        del tent_crop, tent_yz
+        del tent_yz
 
     mem_y_min = int(np.where(mem_exists)[0].min())
     mem_y_max = int(np.where(mem_exists)[0].max())
@@ -696,20 +726,15 @@ def reconstruct_falx(mat, fs, skull_sdf, dx_mm, crop_slices,
     body_y = cc_landmarks.get("body", (splenium_y, 0))[0]
     genu_y = cc_landmarks.get("genu", (body_y, 0))[0]
 
+    # Tent midline anchor (vectorized via _get_edges)
     mid_x = X // 2
-    tent_mid_top = np.full(Y, -1, dtype=int)
-    tent_mid_exists = np.zeros(Y, dtype=bool)
-    if tent_mask is not None:
-        tent_crop = tent_mask[crop_slices]
+    if tent_crop is not None:
         tent_mid = tent_crop[mid_x]
-        for y in range(Y):
-            zz = np.where(tent_mid[y])[0]
-            if len(zz) > 0:
-                tent_mid_top[y] = zz.max()
-                tent_mid_exists[y] = True
-        del tent_crop
+        tent_mid_top, _, tent_mid_exists = _get_edges(tent_mid, Y, Z)
+        tent_mid_ys = np.where(tent_mid_exists)[0]
+    else:
+        tent_mid_ys = np.array([], dtype=int)
 
-    tent_mid_ys = np.where(tent_mid_exists)[0]
     if len(tent_mid_ys) > 0:
         anchor_y = int(tent_mid_ys.max())
         anchor_z = float(tent_mid_top[anchor_y])
@@ -723,35 +748,35 @@ def reconstruct_falx(mat, fs, skull_sdf, dx_mm, crop_slices,
     crista_y, crista_z = _detect_crista_galli(
         skull_crop, mid_x, genu_y, mem_y_max,
         mem_exists, mem_top_z, mem_bot_z, dx_mm, Z, cc_landmarks)
-    del skull_crop
 
-    # Free edge: PCHIP control points + Bezier shape
-    pchip_ys, pchip_zs, genu_ctrl_z = _build_free_edge_controls(
-        cc_landmarks, mem_top_z, cc_top_z, cc_exists,
-        mem_bot_z, anchor_y, anchor_z, genu_y)
+    return _FalxGeometry(
+        mem_top_z=mem_top_z, mem_bot_z=mem_bot_z, mem_exists=mem_exists,
+        mem_y_min=mem_y_min, mem_y_max=mem_y_max,
+        tent_top_z=tent_top_z, tent_exists=tent_exists,
+        cc_landmarks=cc_landmarks, cc_top_z=cc_top_z, cc_exists=cc_exists,
+        anchor_y=anchor_y, anchor_z=anchor_z,
+        crista_y=crista_y, crista_z=crista_z,
+        genu_y=genu_y, mid_x=mid_x,
+    )
 
-    outer_y, outer_z, posterior_area_vox2 = _collect_boundary_polylines(
-        mem_top_z, mem_bot_z, mem_exists,
-        anchor_y, crista_y, mem_y_min, mem_y_max,
-        tent_top_z, tent_exists)
 
-    result = _solve_bezier_shape(
-        pchip_ys, pchip_zs, genu_y, genu_ctrl_z,
-        crista_y, crista_z, outer_y, outer_z,
-        mem_top_z, mem_bot_z, mem_exists, mem_y_max,
-        anchor_y, anchor_z, posterior_area_vox2, dx_mm)
-    if result is None:
-        return  # degenerate geometry
-    inner_ys, inner_zs = result
+def _rasterize_falx_cookie(membrane, inner_ys, inner_zs, geo, tent_crop,
+                           crop_slices, full_shape, n_membrane):
+    """Polygon fill + tentorium cut → falx_mask on full grid.
 
-    # Rasterize falx polygon
-    tent_ys_arr = np.where(tent_exists)[0]
-    tent_post_y = int(tent_ys_arr.min()) if len(tent_ys_arr) > 0 else anchor_y
+    Returns falx_mask (boolean, full grid shape).
+    """
+    X, Y, Z = membrane.shape
+
+    # Collect and rasterize polygon
+    tent_ys_arr = np.where(geo.tent_exists)[0]
+    tent_post_y = (int(tent_ys_arr.min()) if len(tent_ys_arr) > 0
+                   else geo.anchor_y)
 
     poly_y, poly_z = _collect_falx_polygon(
-        inner_ys, inner_zs, crista_y, mem_bot_z, mem_top_z,
-        mem_exists, mem_y_min, mem_y_max,
-        tent_post_y, tent_top_z, tent_exists)
+        inner_ys, inner_zs, geo.crista_y, geo.mem_bot_z, geo.mem_top_z,
+        geo.mem_exists, geo.mem_y_min, geo.mem_y_max,
+        tent_post_y, geo.tent_top_z, geo.tent_exists)
 
     rr, cc = draw_polygon(poly_y, poly_z, shape=(Y, Z))
     cookie = np.zeros((Y, Z), dtype=bool)
@@ -766,28 +791,27 @@ def reconstruct_falx(mat, fs, skull_sdf, dx_mm, crop_slices,
 
     cookie_3d = np.broadcast_to(cookie[np.newaxis, :, :], (X, Y, Z))
     falx_crop = membrane & cookie_3d
-    del membrane, cookie_3d, cookie
+    del cookie_3d, cookie
 
     n_falx_crop = int(falx_crop.sum())
     print(f"  After cookie-cut: {n_falx_crop} voxels "
           f"(from {n_membrane} membrane)")
 
     # Cut falx below the tentorium surface
-    if tent_mask is not None:
-        tent_crop = tent_mask[crop_slices]
+    if tent_crop is not None:
         tent_below = np.zeros((Y, Z), dtype=bool)
         for y in range(Y):
-            if tent_exists[y]:
-                tent_below[y, :tent_top_z[y]] = True
+            if geo.tent_exists[y]:
+                tent_below[y, :geo.tent_top_z[y]] = True
         tent_below_3d = np.broadcast_to(
             tent_below[np.newaxis, :, :], (X, Y, Z))
         n_below = int((falx_crop & tent_below_3d).sum())
         falx_crop &= ~tent_below_3d
-        del tent_crop, tent_below, tent_below_3d
+        del tent_below, tent_below_3d
         print(f"  Tentorium cut: removed {n_below} voxels below tent surface")
 
     # Write back to full grid
-    falx_mask = np.zeros(mat.shape, dtype=bool)
+    falx_mask = np.zeros(full_shape, dtype=bool)
     falx_mask[crop_slices] = falx_crop
     del falx_crop
 
@@ -795,6 +819,58 @@ def reconstruct_falx(mat, fs, skull_sdf, dx_mm, crop_slices,
     print(f"Falx cerebri: {n_falx} voxels")
 
     return falx_mask
+
+
+def reconstruct_falx(mat, fs, skull_sdf, dx_mm, crop_slices,
+                     thickness_mm=1.0, tent_mask=None):
+    """Reconstruct the falx cerebri via PCHIP + Bezier free edge.
+
+    Full phi=0 midplane membrane through all intracranial tissue,
+    shaped by a PCHIP-interpolated free edge with Bezier genu-crista
+    segment, using Kayalioglu ratios and Frassanito notch constraint.
+    Rasterized via polygon fill.
+
+    Returns falx_mask (boolean).
+    """
+    # Crop all inputs once
+    fs_crop = fs[crop_slices]
+    skull_crop = skull_sdf[crop_slices]
+    tent_crop = tent_mask[crop_slices] if tent_mask is not None else None
+
+    # Phase 1: EDT pair → midplane membrane + CC landmarks
+    membrane, n_membrane, cc_landmarks, cc_top_z, cc_exists = \
+        _compute_midplane_membrane(fs_crop, skull_crop, dx_mm, thickness_mm)
+    del fs_crop
+
+    # Phase 2: Edge profiles, anchor, crista galli → geometry bundle
+    geo = _detect_falx_geometry(
+        membrane, skull_crop, tent_crop,
+        cc_landmarks, cc_top_z, cc_exists, dx_mm)
+    del skull_crop
+
+    # Phase 3: Free edge curve (PCHIP + Bezier)
+    pchip_ys, pchip_zs, genu_ctrl_z = _build_free_edge_controls(
+        geo.cc_landmarks, geo.mem_top_z, geo.cc_top_z, geo.cc_exists,
+        geo.mem_bot_z, geo.anchor_y, geo.anchor_z, geo.genu_y)
+
+    outer_y, outer_z, posterior_area_vox2 = _collect_boundary_polylines(
+        geo.mem_top_z, geo.mem_bot_z, geo.mem_exists,
+        geo.anchor_y, geo.crista_y, geo.mem_y_min, geo.mem_y_max,
+        geo.tent_top_z, geo.tent_exists)
+
+    result = _solve_bezier_shape(
+        pchip_ys, pchip_zs, geo.genu_y, genu_ctrl_z,
+        geo.crista_y, geo.crista_z, outer_y, outer_z,
+        geo.mem_top_z, geo.mem_bot_z, geo.mem_exists, geo.mem_y_max,
+        geo.anchor_y, geo.anchor_z, posterior_area_vox2, dx_mm)
+    if result is None:
+        return None
+    inner_ys, inner_zs = result
+
+    # Phase 4: Polygon rasterization + tentorium cut
+    return _rasterize_falx_cookie(
+        membrane, inner_ys, inner_zs, geo, tent_crop,
+        crop_slices, mat.shape, n_membrane)
 
 
 def _measure_notch_ellipse(mat_crop, dx_mm):
