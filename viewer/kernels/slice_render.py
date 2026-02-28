@@ -71,6 +71,8 @@ def categorical_slice(
     pan_x: float, pan_y: float,  # pan offset in voxel coords
 ):
     """Render categorical volume slice into composite buffer with alpha blend."""
+    bw = buf.shape[0]
+    bh = buf.shape[1]
     for px, py in ti.ndrange(pw, ph):
         dim_u, dim_v = _get_slice_dims(vol, axis)
         u, v = _pixel_to_voxel(px, py, pw, ph, dim_u, dim_v, zoom, pan_x, pan_y)
@@ -84,8 +86,9 @@ def categorical_slice(
             if a > 0.0:
                 bx = px0 + px
                 by = py0 + py
-                old = buf[bx, by]
-                buf[bx, by] = old * (1.0 - a) + rgba.xyz * a
+                if 0 <= bx < bw and 0 <= by < bh:
+                    old = buf[bx, by]
+                    buf[bx, by] = old * (1.0 - a) + rgba.xyz * a
 
 
 @ti.kernel
@@ -103,6 +106,8 @@ def scalar_slice(
     pan_x: float, pan_y: float,
 ):
     """Render scalar volume slice with continuous colormap."""
+    bw = buf.shape[0]
+    bh = buf.shape[1]
     for px, py in ti.ndrange(pw, ph):
         dim_u, dim_v = _get_slice_dims(vol, axis)
         u, v = _pixel_to_voxel(px, py, pw, ph, dim_u, dim_v, zoom, pan_x, pan_y)
@@ -123,5 +128,6 @@ def scalar_slice(
             if a > 0.0:
                 bx = px0 + px
                 by = py0 + py
-                old = buf[bx, by]
-                buf[bx, by] = old * (1.0 - a) + rgba.xyz * a
+                if 0 <= bx < bw and 0 <= by < bh:
+                    old = buf[bx, by]
+                    buf[bx, by] = old * (1.0 - a) + rgba.xyz * a

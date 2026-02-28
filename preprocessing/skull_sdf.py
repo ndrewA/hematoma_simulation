@@ -37,6 +37,7 @@ from scipy.ndimage import (
 from preprocessing.profiling import step
 from preprocessing.utils import (
     PROFILES,
+    _PROJECT_ROOT,
     add_grid_args,
     processed_dir,
     raw_dir,
@@ -93,8 +94,8 @@ def parse_args(argv=None):
     parser.add_argument(
         "--tpm-path",
         type=str,
-        default="data/atlases/SPM_TPM.nii",
-        help="Path to brain probability atlas (default: data/atlases/SPM_TPM.nii)",
+        default=str(_PROJECT_ROOT / "data" / "atlases" / "SPM_TPM.nii"),
+        help="Path to brain probability atlas",
     )
 
     args = parser.parse_args(argv)

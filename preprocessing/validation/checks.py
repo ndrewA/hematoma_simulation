@@ -175,9 +175,10 @@ def check_h1(ctx):
     """Bitwise-identical affines across grid NIfTIs."""
     headers = ctx.headers
     mat_affine = headers["mat"].affine
+    check_keys = [k for k in ("sdf", "brain", "fs") if k in headers]
     all_match = all(
         np.array_equal(mat_affine, headers[k].affine)
-        for k in ("sdf", "brain", "fs")
+        for k in check_keys
     )
     ctx.record("H1", all_match)
 
@@ -187,10 +188,10 @@ def check_h2(ctx):
     """Shape matches grid_meta grid_size."""
     headers = ctx.headers
     N = ctx.N
-    shapes_ok = all(headers[k].shape == (N, N, N)
-                    for k in ("mat", "sdf", "brain", "fs"))
+    check_keys = [k for k in ("mat", "sdf", "brain", "fs") if k in headers]
+    shapes_ok = all(headers[k].shape == (N, N, N) for k in check_keys)
     value = (f"{N}x{N}x{N}" if shapes_ok
-             else str({k: headers[k].shape for k in headers}))
+             else str({k: headers[k].shape for k in check_keys}))
     ctx.record("H2", shapes_ok, value=value)
 
 
@@ -724,10 +725,11 @@ def check_c7(ctx):
     del brainstem
 
     csf_mask = (mat == 8)
+    gap_vox = max(1, int(round(3.0 / ctx.dx)))  # 3mm gap in physical units
     supra_csf = csf_mask.copy()
-    supra_csf[:, :, :tent_z + 6] = False
+    supra_csf[:, :, :tent_z + gap_vox] = False
     infra_csf = csf_mask.copy()
-    infra_csf[:, :, tent_z - 5:] = False
+    infra_csf[:, :, tent_z - gap_vox + 1:] = False
     del csf_mask
 
     n_supra = int(np.count_nonzero(supra_csf))
@@ -979,18 +981,18 @@ def check_f2(ctx):
     n_eig_fail = 0
     if n_eig_sample > 0:
         eig_sample = nonzero_indices[rng.choice(len(nonzero_indices), size=n_eig_sample, replace=False)]
-        for idx in eig_sample:
-            i, j, k = idx
-            m = fiber_data[i, j, k]
-            mat3 = np.array([
-                [m[0], m[3], m[4]],
-                [m[3], m[1], m[5]],
-                [m[4], m[5], m[2]],
-            ], dtype=np.float64)
-            eigvals = np.linalg.eigvalsh(mat3)
-            if np.any(eigvals < -1e-7):
-                n_eig_fail += 1
-                f2_pass = False
+        m = fiber_data[eig_sample[:, 0], eig_sample[:, 1], eig_sample[:, 2]]
+        mats = np.zeros((n_eig_sample, 3, 3), dtype=np.float64)
+        mats[:, 0, 0] = m[:, 0]
+        mats[:, 1, 1] = m[:, 1]
+        mats[:, 2, 2] = m[:, 2]
+        mats[:, 0, 1] = mats[:, 1, 0] = m[:, 3]
+        mats[:, 0, 2] = mats[:, 2, 0] = m[:, 4]
+        mats[:, 1, 2] = mats[:, 2, 1] = m[:, 5]
+        eigvals = np.linalg.eigvalsh(mats)
+        n_eig_fail = int(np.count_nonzero(np.any(eigvals < -1e-7, axis=1)))
+        if n_eig_fail > 0:
+            f2_pass = False
 
     if n_eig_fail > 0:
         f2_detail.append(f"eigen: {n_eig_fail}/{n_eig_sample} fail")

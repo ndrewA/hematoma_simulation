@@ -27,7 +27,10 @@ import nibabel as nib
 import numpy as np
 
 from preprocessing.profiling import step
-from preprocessing.utils import PROFILES, processed_dir, raw_dir, validation_dir
+from preprocessing.utils import (
+    PROFILES, add_grid_args, processed_dir, raw_dir, resolve_grid_args,
+    validation_dir,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -100,8 +103,10 @@ class CheckContext:
     def headers(self):
         if self._headers is None:
             self._headers = {}
-            for name in ("mat", "sdf", "brain", "fs"):
+            for name in ("mat", "sdf", "brain"):
                 self._headers[name] = nib.load(str(self.paths[name]))
+            if self.paths["fs"].exists():
+                self._headers["fs"] = nib.load(str(self.paths["fs"]))
         return self._headers
 
     @property
@@ -166,11 +171,7 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="Cross-cutting validation of all preprocessing outputs."
     )
-    parser.add_argument("--subject", required=True, help="HCP subject ID")
-    parser.add_argument(
-        "--profile", required=True, choices=list(PROFILES.keys()),
-        help="Simulation profile",
-    )
+    add_grid_args(parser)
     parser.add_argument("--no-images", action="store_true",
                         help="Skip figure generation")
     parser.add_argument("--no-fiber", action="store_true",
@@ -193,7 +194,9 @@ def parse_args(argv=None):
         help="Skip checks, only generate figures. Optional comma-separated "
              "figure numbers (e.g. --only-figures 1,2). Default: all.",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    resolve_grid_args(args, parser)
+    return args
 
 
 # ---------------------------------------------------------------------------
@@ -451,7 +454,7 @@ def main(argv=None):
     args = parse_args(argv)
     subject = args.subject
     profile = args.profile
-    N, dx = PROFILES[profile]
+    N, dx = args.N, args.dx
     no_fiber = args.no_fiber
     no_dural = args.no_dural
     no_ground_truth = args.no_ground_truth

@@ -147,7 +147,7 @@ def voxel_trace(
             acc_alpha = 0.0
             prev_group = GROUP_EMPTY
 
-            for _step in range(1024):
+            for _step in range(N_i * 3):
                 if ix < 0 or ix >= N_i or iy < 0 or iy >= N_i or iz < 0 or iz >= N_i:
                     break
                 if acc_alpha > 0.99:
@@ -178,14 +178,18 @@ def voxel_trace(
                         label = 12
                         group = GROUP_SKULL
 
-                # Composite at group transitions (entering a new non-empty group)
-                if group != GROUP_EMPTY and group != prev_group:
-                    rgba = cat_lut[label]
-                    voxel_color = tm.vec3(rgba.x, rgba.y, rgba.z)
-                    shaded = shade_voxel(voxel_color, face_n, rd)
+                # Composite non-empty voxels
+                if group != GROUP_EMPTY:
                     a = group_opacity[group]
-                    acc_color += shaded * a * (1.0 - acc_alpha)
-                    acc_alpha += a * (1.0 - acc_alpha)
+                    # Skip opaque interior (already fully composited at entry)
+                    if a > 0.0 and not (group == prev_group and a >= 1.0):
+                        rgba = cat_lut[label]
+                        voxel_color = tm.vec3(rgba.x, rgba.y, rgba.z)
+                        shaded = voxel_color * 0.35
+                        if group != prev_group:
+                            shaded = shade_voxel(voxel_color, face_n, rd)
+                        acc_color += shaded * a * (1.0 - acc_alpha)
+                        acc_alpha += a * (1.0 - acc_alpha)
 
                 prev_group = group
 

@@ -47,14 +47,18 @@ def parse_args(argv=None):
     return args
 
 
-def build_step_argv(step_module, subject, profile):
+def build_step_argv(step_module, subject, profile, N, dx):
     """Build argv list for a step's main().
 
     fiber_orientation is profile-independent (no --profile arg).
+    Custom profiles (from --dx/--grid-size) forward the raw N and dx
+    instead of a profile name, since child steps only know named profiles.
     """
     if step_module == "preprocessing.fiber_orientation":
         return ["--subject", subject]
-    return ["--subject", subject, "--profile", profile]
+    if profile in PROFILES:
+        return ["--subject", subject, "--profile", profile]
+    return ["--subject", subject, "--dx", str(dx), "--grid-size", str(N)]
 
 
 def main(argv=None):
@@ -84,7 +88,8 @@ def main(argv=None):
                 print(f"FATAL: Could not import {module_name}: {e}")
                 sys.exit(1)
 
-            step_argv = build_step_argv(module_name, subject, profile)
+            step_argv = build_step_argv(module_name, subject, profile,
+                                           args.N, args.dx)
 
             with step(step_name):
                 try:

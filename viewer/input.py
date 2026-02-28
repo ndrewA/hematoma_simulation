@@ -13,12 +13,16 @@ def process_input(window, state):
     global _prev_keys
 
     curr_keys = set()
+    consumed = set()
 
     def pressed(key):
         is_down = window.is_pressed(key)
         if is_down:
             curr_keys.add(key)
-        return is_down and key not in _prev_keys
+        if is_down and key not in _prev_keys and key not in consumed:
+            consumed.add(key)
+            return True
+        return False
 
     # --- Quit ---
     if pressed(ti.ui.ESCAPE):
@@ -104,6 +108,11 @@ def process_input(window, state):
     # --- UI toggle ---
     if pressed('h'):
         state.show_ui = not state.show_ui
+
+    # --- Layer toggles (1-6) ---
+    for idx, key in enumerate('123456'):
+        if pressed(key) and idx < len(state.layers):
+            state.layers[idx].visible = not state.layers[idx].visible
 
     _prev_keys = curr_keys
     return True

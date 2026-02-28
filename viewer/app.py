@@ -118,6 +118,7 @@ def launch(subject_id, profile):
     while window.running:
         win_w, win_h = window.get_window_shape()
         if win_w != display_size[0] or win_h != display_size[1]:
+            display.destroy()
             display = ti.Vector.field(3, dtype=ti.f32, shape=(win_w, win_h))
             display_size = [win_w, win_h]
 
@@ -199,7 +200,8 @@ def launch(subject_id, profile):
         blit(buf, display, rw, rh)
         canvas.set_image(display)
 
-        _draw_gui(window, state, layers)
+        if state.show_ui:
+            _draw_gui(window, state, layers)
 
         window.show()
 

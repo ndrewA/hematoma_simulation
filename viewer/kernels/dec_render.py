@@ -52,6 +52,8 @@ def dec_slice(
 
     dim_u = grid_N
     dim_v = grid_N
+    bw = buf.shape[0]
+    bh = buf.shape[1]
 
     for px, py in ti.ndrange(pw, ph):
         scale = ti.min(float(pw) / float(dim_u), float(ph) / float(dim_v)) * zoom
@@ -108,5 +110,6 @@ def dec_slice(
                     a = opacity
                     bx = px0 + px
                     by = py0 + py
-                    old = buf[bx, by]
-                    buf[bx, by] = old * (1.0 - a) + color * a
+                    if 0 <= bx < bw and 0 <= by < bh:
+                        old = buf[bx, by]
+                        buf[bx, by] = old * (1.0 - a) + color * a

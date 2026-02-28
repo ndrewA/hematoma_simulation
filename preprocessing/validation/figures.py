@@ -105,7 +105,16 @@ def generate_all_figures(ctx, which=None):
                 print(f"  WARNING: Figure 5 failed: {e}")
 
     if which is None or 6 in which:
-        if ctx.has_simnibs and "gt_verts_ours" in ctx._cache:
+        if ctx.has_simnibs:
+            # Ensure surface distances are computed (may not be if checks were skipped)
+            if "gt_verts_ours" not in ctx._cache:
+                from preprocessing.validation.checks import _compute_surface_distances
+                sd = ctx.get_cached("surface_distances",
+                                    lambda: _compute_surface_distances(ctx))
+                ctx._cache["gt_verts_ours"] = sd["phys_ours"]
+                ctx._cache["gt_verts_sim"] = sd["phys_sim"]
+                ctx._cache["gt_d_o2s"] = sd["d_o2s"]
+                ctx._cache["gt_d_s2o"] = sd["d_s2o"]
             print("  Generating Figure 6...")
             try:
                 generate_fig6(
@@ -137,7 +146,7 @@ def generate_fig1(mat, t1w, N, subject, profile, dx, path):
         t1w[:, :, mid],
     ] if t1w is not None else [None, None, None]
 
-    titles = ["Axial (z)", "Coronal (y)", "Sagittal (x)"]
+    titles = ["Sagittal (x)", "Coronal (y)", "Axial (z)"]
 
     fig, axes = plt.subplots(2, 3, figsize=(14, 9))
     fig.suptitle(f"Material Map — {subject} / {profile} ({N}\u00b3, {dx} mm)",
@@ -502,11 +511,11 @@ def generate_fig5(our_sdf, simnibs_sdf, labels_sim, inner_boundary,
 
     # Row 1: Triplanar with both contours
     slice_specs = [
-        ("Axial (z)", our_sdf[mid, :, :], simnibs_sdf[mid, :, :],
+        ("Sagittal (x)", our_sdf[mid, :, :], simnibs_sdf[mid, :, :],
          t1w[mid, :, :] if t1w is not None else None),
         ("Coronal (y)", our_sdf[:, mid, :], simnibs_sdf[:, mid, :],
          t1w[:, mid, :] if t1w is not None else None),
-        ("Sagittal (x)", our_sdf[:, :, mid], simnibs_sdf[:, :, mid],
+        ("Axial (z)", our_sdf[:, :, mid], simnibs_sdf[:, :, mid],
          t1w[:, :, mid] if t1w is not None else None),
     ]
 
