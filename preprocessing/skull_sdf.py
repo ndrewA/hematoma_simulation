@@ -476,8 +476,7 @@ def print_validation(sdf_sim, args, grid_affine, out_dir,
         print(f"   No growth applied (T2w unavailable)")
 
     if failed:
-        print(f"\nCRITICAL: validation failed (see FAIL above)")
-        sys.exit(1)
+        raise ValueError("Skull SDF validation failed (see FAIL above)")
 
 
 # ---------------------------------------------------------------------------

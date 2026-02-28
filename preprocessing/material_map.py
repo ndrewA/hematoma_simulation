@@ -295,15 +295,15 @@ def print_validation(material):
     valid_range = set(range(12))
     out_of_range = unique_vals - valid_range
     if out_of_range:
-        print(f"\nM1 [CRITICAL FAIL]: values outside {{0..11}}: {sorted(out_of_range)}")
-        sys.exit(1)
+        raise ValueError(
+            f"Material map has values outside {{0..11}}: {sorted(out_of_range)}"
+        )
     else:
         print(f"\nM1 [OK]: All unique values in {{0..11}}: {sorted(unique_vals)}")
 
     # M2: 255 not present
     if 255 in unique_vals:
-        print("M2 [CRITICAL FAIL]: u8=255 found in material map")
-        sys.exit(1)
+        raise ValueError("Material map contains u8=255")
     else:
         print("M2 [OK]: u8=255 not present")
 

@@ -25,8 +25,6 @@ def blit(src: ti.template(), dst: ti.template(), w: int, h: int):
         dst[x, y] = src[x, y]
 
 
-BUF_W, BUF_H = 2560, 1440
-
 LAYOUT_NAMES = {LayoutMode.SLICES: "Slices", LayoutMode.THREE_D: "3D"}
 
 
@@ -89,9 +87,9 @@ def launch(subject_id, profile):
     init_w, init_h = 1280, 720
     window = ti.ui.Window("Viewer", (init_w, init_h), vsync=True)
     canvas = window.get_canvas()
-    buf = ti.Vector.field(3, dtype=ti.f32, shape=(BUF_W, BUF_H))
+    buf = ti.Vector.field(3, dtype=ti.f32, shape=(init_w, init_h))
     display = ti.Vector.field(3, dtype=ti.f32, shape=(init_w, init_h))
-    display_size = [init_w, init_h]
+    buf_size = [init_w, init_h]
 
     print("Controls:")
     layer_keys = 'FGZXCV'
@@ -116,26 +114,25 @@ def launch(subject_id, profile):
 
     while window.running:
         win_w, win_h = window.get_window_shape()
-        # Clamp render area to buffer size to prevent out-of-bounds writes
-        rw = min(win_w, BUF_W)
-        rh = min(win_h, BUF_H)
 
-        if rw != display_size[0] or rh != display_size[1]:
+        if win_w != buf_size[0] or win_h != buf_size[1]:
+            buf.destroy()
+            buf = ti.Vector.field(3, dtype=ti.f32, shape=(win_w, win_h))
             display.destroy()
-            display = ti.Vector.field(3, dtype=ti.f32, shape=(rw, rh))
-            display_size = [rw, rh]
+            display = ti.Vector.field(3, dtype=ti.f32, shape=(win_w, win_h))
+            buf_size = [win_w, win_h]
 
-        state.layout.update(rw, rh, state.layout_mode, state.fullscreen_panel)
+        state.layout.update(win_w, win_h, state.layout_mode, state.fullscreen_panel)
 
         if not process_input(window, state):
             break
 
-        clear(buf, rw, rh, 0.08, 0.08, 0.10)
+        clear(buf, win_w, win_h, 0.08, 0.08, 0.10)
 
         # Sidebar background (slightly lighter than main bg)
         sb_x0 = state.layout.sidebar_x0
-        if sb_x0 < rw:
-            fill_rect(buf, sb_x0, 0, rw - sb_x0, rh, 0.11, 0.11, 0.13)
+        if sb_x0 < win_w:
+            fill_rect(buf, sb_x0, 0, win_w - sb_x0, win_h, 0.11, 0.11, 0.13)
 
         _render_slice_panels(state, layers, luts, g2f_matrix, buf, N)
 
@@ -152,7 +149,7 @@ def launch(subject_id, profile):
             draw_panel_border(buf, p3.x0, p3.y0, p3.w, p3.h,
                               *(0.6, 0.6, 0.2) if focused else (0.15, 0.15, 0.18))
 
-        blit(buf, display, rw, rh)
+        blit(buf, display, win_w, win_h)
         canvas.set_image(display)
 
         if state.show_ui:

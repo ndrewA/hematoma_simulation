@@ -91,7 +91,7 @@ class TestCheckDomainClosure:
     def test_fails_on_vacuum_inside(self):
         mat = np.zeros((10, 10, 10), dtype=np.uint8)
         sdf = np.full((10, 10, 10), -5.0, dtype=np.float32)  # inside skull
-        with pytest.raises(SystemExit):
+        with pytest.raises(ValueError):
             check_domain_closure(mat, sdf)
 
 

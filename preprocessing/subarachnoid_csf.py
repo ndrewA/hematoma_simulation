@@ -8,7 +8,6 @@ remains inside the skull after this step.
 
 import argparse
 import json
-import sys
 
 import nibabel as nib
 import numpy as np
@@ -170,7 +169,7 @@ def fill_subarachnoid_csf(mat, sdf, brain):
 def check_domain_closure(mat, sdf):
     """CRITICAL: verify no vacuum remains inside the skull.
 
-    Exits with code 1 on failure.
+    Raises ValueError on failure.
     """
     vacuum_inside = (sdf < 0) & (mat == 0)
     n_violation = int(np.count_nonzero(vacuum_inside))
@@ -180,8 +179,9 @@ def check_domain_closure(mat, sdf):
     print("=" * 60)
 
     if n_violation > 0:
-        print(f"CRITICAL FAIL: {n_violation} vacuum voxels remain inside skull")
-        sys.exit(1)
+        raise ValueError(
+            f"Domain closure failed: {n_violation} vacuum voxels remain inside skull"
+        )
     else:
         print("OK: no vacuum inside skull (domain closure satisfied)")
 

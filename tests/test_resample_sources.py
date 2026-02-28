@@ -36,9 +36,9 @@ class TestComputeBrainBbox:
         np.testing.assert_array_equal(bbox_max, [3, 7, 2])
         assert n_voxels == 1
 
-    def test_empty_mask_exits(self):
+    def test_empty_mask_raises(self):
         mask = np.zeros((10, 10, 10), dtype=np.uint8)
-        with pytest.raises(SystemExit):
+        with pytest.raises(ValueError):
             compute_brain_bbox(mask)
 
 

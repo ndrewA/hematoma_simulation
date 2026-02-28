@@ -10,7 +10,6 @@ computes brain bounding box metadata, and saves outputs:
 
 import argparse
 import json
-import sys
 
 import nibabel as nib
 import numpy as np
@@ -85,8 +84,7 @@ def compute_brain_bbox(mask):
     """
     coords = np.argwhere(mask > 0)
     if len(coords) == 0:
-        print("FATAL: resampled brain mask has zero nonzero voxels.")
-        sys.exit(1)
+        raise ValueError("Resampled brain mask has zero nonzero voxels")
 
     bbox_min = coords.min(axis=0)
     bbox_max = coords.max(axis=0)
