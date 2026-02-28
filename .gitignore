@@ -4,6 +4,7 @@ CLAUDE.md
 session_logs/
 __pycache__/
 *.pyc
+.coverage
 .venv/
 *.egg-info/
 imgui.ini
