@@ -222,9 +222,7 @@ def _draw_line_safe(y0, z0, y1, z1, target, Y, Z):
     target[rr, cc] = True
 
 
-def _collect_falx_polygon(inner_ys, inner_zs, crista_y, mem_bot_z, mem_top_z,
-                           mem_exists, mem_y_min, mem_y_max,
-                           tent_post_y, tent_top_z, tent_exists):
+def _collect_falx_polygon(inner_ys, inner_zs, geo, tent_post_y):
     """Collect ordered polygon vertices for falx cookie-cutter region.
 
     Traces the closed boundary of the falx region in the sagittal (Y-Z) plane:
@@ -241,48 +239,48 @@ def _collect_falx_polygon(inner_ys, inner_zs, crista_y, mem_bot_z, mem_top_z,
         poly_z.append(float(inner_zs[i]))
 
     # Free edge end → skull bottom at crista
-    poly_y.append(float(crista_y))
-    poly_z.append(float(mem_bot_z[crista_y]))
+    poly_y.append(float(geo.crista_y))
+    poly_z.append(float(geo.mem_bot_z[geo.crista_y]))
 
     # Skull bottom crista → frontal pole
-    for y in range(crista_y + 1, mem_y_max + 1):
-        if mem_exists[y]:
+    for y in range(geo.crista_y + 1, geo.mem_y_max + 1):
+        if geo.mem_exists[y]:
             poly_y.append(float(y))
-            poly_z.append(float(mem_bot_z[y]))
+            poly_z.append(float(geo.mem_bot_z[y]))
 
     # Frontal pole vertical (bottom → top)
-    if mem_exists[mem_y_max]:
-        poly_y.append(float(mem_y_max))
-        poly_z.append(float(mem_top_z[mem_y_max]))
+    if geo.mem_exists[geo.mem_y_max]:
+        poly_y.append(float(geo.mem_y_max))
+        poly_z.append(float(geo.mem_top_z[geo.mem_y_max]))
 
     # Skull top frontal → posterior
-    for y in range(mem_y_max - 1, mem_y_min - 1, -1):
-        if mem_exists[y]:
+    for y in range(geo.mem_y_max - 1, geo.mem_y_min - 1, -1):
+        if geo.mem_exists[y]:
             poly_y.append(float(y))
-            poly_z.append(float(mem_top_z[y]))
+            poly_z.append(float(geo.mem_top_z[y]))
 
     # Posterior vertical (top → bottom)
-    if mem_exists[mem_y_min]:
-        poly_y.append(float(mem_y_min))
-        poly_z.append(float(mem_bot_z[mem_y_min]))
+    if geo.mem_exists[geo.mem_y_min]:
+        poly_y.append(float(geo.mem_y_min))
+        poly_z.append(float(geo.mem_bot_z[geo.mem_y_min]))
 
     # Skull bottom posterior → tent start
-    for y in range(mem_y_min + 1, tent_post_y + 1):
-        if mem_exists[y]:
+    for y in range(geo.mem_y_min + 1, tent_post_y + 1):
+        if geo.mem_exists[y]:
             poly_y.append(float(y))
-            poly_z.append(float(mem_bot_z[y]))
+            poly_z.append(float(geo.mem_bot_z[y]))
 
     # Tent start vertical (bottom → top)
-    if tent_exists[tent_post_y]:
+    if geo.tent_exists[tent_post_y]:
         poly_y.append(float(tent_post_y))
-        poly_z.append(float(tent_top_z[tent_post_y]))
+        poly_z.append(float(geo.tent_top_z[tent_post_y]))
 
     # Tent top tent_post → anchor
     anchor_y = int(round(inner_ys[0]))
     for y in range(tent_post_y + 1, anchor_y + 1):
-        if tent_exists[y]:
+        if geo.tent_exists[y]:
             poly_y.append(float(y))
-            poly_z.append(float(tent_top_z[y]))
+            poly_z.append(float(geo.tent_top_z[y]))
 
     # skimage.draw.polygon auto-closes (last vertex → first vertex)
     return np.array(poly_y), np.array(poly_z)
@@ -420,8 +418,9 @@ def _detect_crista_galli(fs_crop, mid_x, genu_y):
     ys, zs = np.where(mof_yz)
 
     anterior = ys > genu_y
-    assert anterior.any(), (
-        "No medial orbitofrontal cortex (1014/2014) found anterior to genu")
+    if not anterior.any():
+        raise ValueError(
+            "No medial orbitofrontal cortex (1014/2014) found anterior to genu")
     ys, zs = ys[anterior], zs[anterior]
 
     idx = int(np.argmin(zs))
@@ -430,8 +429,7 @@ def _detect_crista_galli(fs_crop, mid_x, genu_y):
     return crista_y, crista_z
 
 
-def _build_free_edge_controls(cc_landmarks, mem_top_z, cc_top_z, cc_exists,
-                              mem_bot_z, anchor_y, anchor_z, genu_y):
+def _build_free_edge_controls(geo):
     """Build PCHIP control points and interpolate the free edge curve.
 
     Control points: anchor → splenium → body → genu, using Kayalioglu
@@ -439,16 +437,16 @@ def _build_free_edge_controls(cc_landmarks, mem_top_z, cc_top_z, cc_exists,
 
     Returns (pchip_ys, pchip_zs, genu_ctrl_z).
     """
-    ctrl_y = [float(anchor_y)]
-    ctrl_z = [anchor_z]
+    ctrl_y = [float(geo.anchor_y)]
+    ctrl_z = [geo.anchor_z]
     for name, ratio in [("splenium", _RATIO_SPLENIUM),
                          ("body", _RATIO_BODY),
                          ("genu", _RATIO_GENU)]:
-        if name in cc_landmarks:
-            y_cc, _ = cc_landmarks[name]
-            skull_top = mem_top_z[y_cc]
-            cc_top_val = (cc_top_z[y_cc] if cc_exists[y_cc]
-                          else mem_bot_z[y_cc])
+        if name in geo.cc_landmarks:
+            y_cc, _ = geo.cc_landmarks[name]
+            skull_top = geo.mem_top_z[y_cc]
+            cc_top_val = (geo.cc_top_z[y_cc] if geo.cc_exists[y_cc]
+                          else geo.mem_bot_z[y_cc])
             z_val = skull_top - ratio * (skull_top - cc_top_val)
             ctrl_y.append(float(y_cc))
             ctrl_z.append(float(z_val))
@@ -456,15 +454,13 @@ def _build_free_edge_controls(cc_landmarks, mem_top_z, cc_top_z, cc_exists,
     ctrl_y = np.array(ctrl_y)
     ctrl_z = np.array(ctrl_z)
     pchip = PchipInterpolator(ctrl_y, ctrl_z)
-    pchip_ys = np.arange(anchor_y, genu_y, dtype=float)
+    pchip_ys = np.arange(geo.anchor_y, geo.genu_y, dtype=float)
     pchip_zs = pchip(pchip_ys)
     genu_ctrl_z = float(ctrl_z[-1])
     return pchip_ys, pchip_zs, genu_ctrl_z
 
 
-def _collect_boundary_polylines(mem_top_z, mem_bot_z, mem_exists,
-                                anchor_y, crista_y, mem_y_min, mem_y_max,
-                                tent_top_z, tent_exists):
+def _collect_boundary_polylines(geo):
     """Collect outer boundary polyline and posterior attached area.
 
     Outer boundary traces skull top (anchor→anterior) then wraps back
@@ -474,33 +470,32 @@ def _collect_boundary_polylines(mem_top_z, mem_bot_z, mem_exists,
     """
     outer_ys = []
     outer_zs = []
-    for y in range(anchor_y, mem_y_max + 1):
-        if mem_exists[y]:
+    for y in range(geo.anchor_y, geo.mem_y_max + 1):
+        if geo.mem_exists[y]:
             outer_ys.append(float(y))
-            outer_zs.append(float(mem_top_z[y]))
-    outer_ys.append(float(mem_y_max))
-    outer_zs.append(float(mem_bot_z[mem_y_max]))
-    for y in range(mem_y_max - 1, crista_y - 1, -1):
-        if mem_exists[y]:
+            outer_zs.append(float(geo.mem_top_z[y]))
+    outer_ys.append(float(geo.mem_y_max))
+    outer_zs.append(float(geo.mem_bot_z[geo.mem_y_max]))
+    for y in range(geo.mem_y_max - 1, geo.crista_y - 1, -1):
+        if geo.mem_exists[y]:
             outer_ys.append(float(y))
-            outer_zs.append(float(mem_bot_z[y]))
+            outer_zs.append(float(geo.mem_bot_z[y]))
     outer_y = np.array(outer_ys)
     outer_z = np.array(outer_zs)
 
     posterior_area_vox2 = 0.0
-    for y in range(mem_y_min, anchor_y):
-        if mem_exists[y]:
-            top = mem_top_z[y]
-            bot = tent_top_z[y] if tent_exists[y] else mem_bot_z[y]
+    for y in range(geo.mem_y_min, geo.anchor_y):
+        if geo.mem_exists[y]:
+            top = geo.mem_top_z[y]
+            bot = geo.tent_top_z[y] if geo.tent_exists[y] else geo.mem_bot_z[y]
             posterior_area_vox2 += max(0.0, float(top - bot))
 
     return outer_y, outer_z, posterior_area_vox2
 
 
-def _solve_bezier_shape(pchip_ys, pchip_zs, genu_y, genu_ctrl_z,
-                        crista_y, crista_z, outer_y, outer_z,
-                        mem_top_z, mem_bot_z, mem_exists, mem_y_max,
-                        anchor_y, anchor_z, posterior_area_vox2, dx_mm):
+def _solve_bezier_shape(pchip_ys, pchip_zs, genu_ctrl_z,
+                        outer_y, outer_z, posterior_area_vox2,
+                        geo, dx_mm):
     """Solve Bezier free edge shape matching Frassanito notch area ratio.
 
     Applies a similarity transform of the skull contour to the free edge
@@ -513,24 +508,24 @@ def _solve_bezier_shape(pchip_ys, pchip_zs, genu_y, genu_ctrl_z,
     # Collect skull contour points (genu → anterior tip → crista)
     skull_pts_y = []
     skull_pts_z = []
-    for y in range(genu_y, mem_y_max + 1):
-        if mem_exists[y]:
+    for y in range(geo.genu_y, geo.mem_y_max + 1):
+        if geo.mem_exists[y]:
             skull_pts_y.append(float(y))
-            skull_pts_z.append(float(mem_top_z[y]))
-    skull_pts_y.append(float(mem_y_max))
-    skull_pts_z.append(float(mem_bot_z[mem_y_max]))
-    for y in range(mem_y_max - 1, crista_y - 1, -1):
-        if mem_exists[y]:
+            skull_pts_z.append(float(geo.mem_top_z[y]))
+    skull_pts_y.append(float(geo.mem_y_max))
+    skull_pts_z.append(float(geo.mem_bot_z[geo.mem_y_max]))
+    for y in range(geo.mem_y_max - 1, geo.crista_y - 1, -1):
+        if geo.mem_exists[y]:
             skull_pts_y.append(float(y))
-            skull_pts_z.append(float(mem_bot_z[y]))
+            skull_pts_z.append(float(geo.mem_bot_z[y]))
     skull_pts_y = np.array(skull_pts_y)
     skull_pts_z = np.array(skull_pts_z)
 
     # Similarity transform: map skull contour to free edge endpoints
     skull_start = np.array([skull_pts_y[0], skull_pts_z[0]])
     skull_end = np.array([skull_pts_y[-1], skull_pts_z[-1]])
-    free_start = np.array([float(genu_y), genu_ctrl_z])
-    free_end = np.array([float(crista_y), float(crista_z)])
+    free_start = np.array([float(geo.genu_y), genu_ctrl_z])
+    free_end = np.array([float(geo.crista_y), float(geo.crista_z)])
 
     v_skull = skull_start - skull_end
     v_free = free_start - free_end
@@ -575,23 +570,20 @@ def _solve_bezier_shape(pchip_ys, pchip_zs, genu_y, genu_ctrl_z,
     P3 = free_end
     chord = np.linalg.norm(P3 - P0)
 
-    def _bezier_curve(alpha):
-        d = alpha * chord
-        p1 = P0 + d * T0_dir
-        p2 = P3 - d * T1_dir
-        t = np.linspace(0, 1, 300)
-        by = ((1 - t)**3 * P0[0] + 3 * (1 - t)**2 * t * p1[0]
-              + 3 * (1 - t) * t**2 * p2[0] + t**3 * P3[0])
-        bz = ((1 - t)**3 * P0[1] + 3 * (1 - t)**2 * t * p1[1]
-              + 3 * (1 - t) * t**2 * p2[1] + t**3 * P3[1])
+    def _eval_bezier(p1, p2, n_pts):
+        t = np.linspace(0, 1, n_pts)
+        s = 1 - t
+        by = s**3 * P0[0] + 3 * s**2 * t * p1[0] + 3 * s * t**2 * p2[0] + t**3 * P3[0]
+        bz = s**3 * P0[1] + 3 * s**2 * t * p1[1] + 3 * s * t**2 * p2[1] + t**3 * P3[1]
         return by, bz
 
     def _notch_ratio(alpha):
-        by, bz = _bezier_curve(alpha)
+        d = alpha * chord
+        by, bz = _eval_bezier(P0 + d * T0_dir, P3 - d * T1_dir, 300)
         iy = np.concatenate([pchip_ys, by])
         iz = np.concatenate([pchip_zs, bz])
-        n_y = np.concatenate([iy, [float(anchor_y)]])
-        n_z = np.concatenate([iz, [anchor_z]])
+        n_y = np.concatenate([iy, [float(geo.anchor_y)]])
+        n_z = np.concatenate([iz, [geo.anchor_z]])
         notch = _shoelace_area(n_y, n_z)
         f_y = np.concatenate([outer_y, iy[::-1]])
         f_z = np.concatenate([outer_z, iz[::-1]])
@@ -608,12 +600,7 @@ def _solve_bezier_shape(pchip_ys, pchip_zs, genu_y, genu_ctrl_z,
     print(f"  Bezier: \u03b1={alpha_solved:.3f}, d={d_solved * dx_mm:.1f}mm")
 
     # Dense Bezier sampling (genu → crista)
-    n_bez = 2000
-    t_bez = np.linspace(0, 1, n_bez)
-    bez_y = ((1 - t_bez)**3 * P0[0] + 3 * (1 - t_bez)**2 * t_bez * P1[0]
-             + 3 * (1 - t_bez) * t_bez**2 * P2[0] + t_bez**3 * P3[0])
-    bez_z = ((1 - t_bez)**3 * P0[1] + 3 * (1 - t_bez)**2 * t_bez * P1[1]
-             + 3 * (1 - t_bez) * t_bez**2 * P2[1] + t_bez**3 * P3[1])
+    bez_y, bez_z = _eval_bezier(P1, P2, 2000)
     inner_ys = np.concatenate([pchip_ys, bez_y])
     inner_zs = np.concatenate([pchip_zs, bez_z])
     return inner_ys, inner_zs
@@ -749,9 +736,7 @@ def _rasterize_falx_cookie(membrane, inner_ys, inner_zs, geo, tent_crop,
                    else geo.anchor_y)
 
     poly_y, poly_z = _collect_falx_polygon(
-        inner_ys, inner_zs, geo.crista_y, geo.mem_bot_z, geo.mem_top_z,
-        geo.mem_exists, geo.mem_y_min, geo.mem_y_max,
-        tent_post_y, geo.tent_top_z, geo.tent_exists)
+        inner_ys, inner_zs, geo, tent_post_y)
 
     rr, cc = draw_polygon(poly_y, poly_z, shape=(Y, Z))
     cookie = np.zeros((Y, Z), dtype=bool)
@@ -823,20 +808,13 @@ def reconstruct_falx(mat, fs, skull_sdf, dx_mm, crop_slices,
     del fs_crop, skull_crop
 
     # Phase 3: Free edge curve (PCHIP + Bezier)
-    pchip_ys, pchip_zs, genu_ctrl_z = _build_free_edge_controls(
-        geo.cc_landmarks, geo.mem_top_z, geo.cc_top_z, geo.cc_exists,
-        geo.mem_bot_z, geo.anchor_y, geo.anchor_z, geo.genu_y)
+    pchip_ys, pchip_zs, genu_ctrl_z = _build_free_edge_controls(geo)
 
-    outer_y, outer_z, posterior_area_vox2 = _collect_boundary_polylines(
-        geo.mem_top_z, geo.mem_bot_z, geo.mem_exists,
-        geo.anchor_y, geo.crista_y, geo.mem_y_min, geo.mem_y_max,
-        geo.tent_top_z, geo.tent_exists)
+    outer_y, outer_z, posterior_area_vox2 = _collect_boundary_polylines(geo)
 
     result = _solve_bezier_shape(
-        pchip_ys, pchip_zs, geo.genu_y, genu_ctrl_z,
-        geo.crista_y, geo.crista_z, outer_y, outer_z,
-        geo.mem_top_z, geo.mem_bot_z, geo.mem_exists, geo.mem_y_max,
-        geo.anchor_y, geo.anchor_z, posterior_area_vox2, dx_mm)
+        pchip_ys, pchip_zs, genu_ctrl_z,
+        outer_y, outer_z, posterior_area_vox2, geo, dx_mm)
     if result is None:
         return None
     inner_ys, inner_zs = result
@@ -866,6 +844,7 @@ def _measure_notch_ellipse(mat_crop, dx_mm):
 
     z_indices = np.where(brainstem.any(axis=(0, 1)))[0]
     z_min_bs, z_max_bs = int(z_indices.min()), int(z_indices.max())
+    # Tentorial notch sits at the superior third of the brainstem
     tent_z = z_min_bs + 2 * (z_max_bs - z_min_bs) // 3
 
     bs_2d = brainstem[:, :, tent_z]
@@ -879,28 +858,42 @@ def _measure_notch_ellipse(mat_crop, dx_mm):
 
     # Measure gap at every y across z-levels below tentorial level
     z_start = max(0, tent_z - round(20.0 / dx_mm))
-    gap_by_y = {}
-    for z in range(z_start, tent_z + 1):
-        cereb_slice = (mat_crop[:, :, z] == 4) | (mat_crop[:, :, z] == 5)
-        for y in range(Y):
-            col = cereb_slice[:, y]
-            left_x = np.where(col[:int(mid_x)])[0]
-            right_x = np.where(col[int(mid_x):])[0]
-            if len(left_x) > 0 and len(right_x) > 0:
-                left_medial = left_x.max()
-                right_medial = int(mid_x) + right_x.min()
-                gap_w = (right_medial - left_medial) * dx_mm
-                if 5 < gap_w < 80:
-                    gap_by_y.setdefault(y, []).append(gap_w)
+    mid_xi = int(mid_x)
 
-    if not gap_by_y:
+    # Cerebellar mask for the z-slab: (X, Y, n_z)
+    cereb_slab = (mat_crop[:, :, z_start:tent_z + 1] == 4) | \
+                 (mat_crop[:, :, z_start:tent_z + 1] == 5)
+
+    # Left hemisphere: any cerebellar voxel in x < mid_x per (y, z)?
+    left_any = cereb_slab[:mid_xi, :, :].any(axis=0)        # (Y, n_z)
+    # Right hemisphere: any cerebellar voxel in x >= mid_x per (y, z)?
+    right_any = cereb_slab[mid_xi:, :, :].any(axis=0)       # (Y, n_z)
+    both_present = left_any & right_any                      # (Y, n_z)
+
+    if not both_present.any():
         return None
 
-    # MNW = max of median gap at each y
-    median_gaps = {y: float(np.median(ws)) for y, ws in gap_by_y.items()}
-    mnw = max(median_gaps.values())
+    # Left medial edge = last (max) x in left half; right medial = mid_x + first (min) x in right half
+    # Flip left half so argmax gives last True
+    left_medial = mid_xi - 1 - np.argmax(cereb_slab[:mid_xi, :, :][::-1, :, :], axis=0)  # (Y, n_z)
+    right_medial = mid_xi + np.argmax(cereb_slab[mid_xi:, :, :], axis=0)                  # (Y, n_z)
+
+    gap_w = (right_medial - left_medial).astype(np.float32) * dx_mm  # (Y, n_z)
+
+    # Reject noise (<5mm) and leakage (>80mm); literature MNW is ~25-35mm
+    valid = both_present & (gap_w > 5) & (gap_w < 80)
+
+    if not valid.any():
+        return None
+
+    # MNW = max of median gap at each y (across z-levels)
+    valid_ys = np.where(valid.any(axis=1))[0]
+    mnw = 0.0
+    for y in valid_ys:
+        m = valid[y]
+        mnw = max(mnw, float(np.median(gap_w[y, m])))
     length = mnw * _TENT_NOTCH_AR
-    buffer_mm = 2.0
+    buffer_mm = 2.0  # pad so exclusion ellipse doesn't clip the notch edge
 
     semi_x = (mnw / 2 + buffer_mm) / dx_mm
     semi_y = (length / 2 + buffer_mm) / dx_mm
@@ -1182,20 +1175,22 @@ def print_junction_thickness(falx_mask, tent_mask, dx_mm, mat):
     # Max contiguous z-run at junction
     overlap_ijk = np.argwhere(overlap)
     if len(overlap_ijk) > 0:
-        # Group by (x, y) and measure max contiguous z-run
-        xy_unique = np.unique(overlap_ijk[:, :2], axis=0)
-        max_z_run = 0
-        for xy in xy_unique:
-            z_vals = np.sort(overlap_ijk[(overlap_ijk[:, 0] == xy[0]) &
-                                         (overlap_ijk[:, 1] == xy[1]), 2])
-            # Find max contiguous run length
-            if len(z_vals) == 1:
-                run = 1
-            else:
-                gaps = np.diff(z_vals)
-                runs = np.split(z_vals, np.where(gaps > 1)[0] + 1)
-                run = max(len(r) for r in runs)
-            max_z_run = max(max_z_run, run)
+        # Sort by (x, y, z) so same-column voxels are adjacent
+        order = np.lexsort((overlap_ijk[:, 2], overlap_ijk[:, 1], overlap_ijk[:, 0]))
+        sorted_ijk = overlap_ijk[order]
+
+        # Column breaks: where x or y changes between consecutive rows
+        col_break = np.diff(sorted_ijk[:, :2], axis=0).any(axis=1)
+        # Z-gaps within same column
+        z_gap = np.diff(sorted_ijk[:, 2]) > 1
+        # A run ends at column breaks or z-gaps
+        run_break = col_break | z_gap
+
+        # Run lengths from break positions
+        break_idx = np.where(run_break)[0]
+        starts = np.concatenate([[0], break_idx + 1])
+        ends = np.concatenate([break_idx + 1, [len(sorted_ijk)]])
+        max_z_run = int((ends - starts).max())
 
         print(f"  Max z-run: {max_z_run} voxels ({max_z_run * dx_mm:.1f} mm)")
         if max_z_run > 3:

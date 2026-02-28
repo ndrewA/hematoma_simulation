@@ -24,7 +24,6 @@ Outputs skull_sdf.nii.gz (float32, negative inside skull, positive outside).
 
 import argparse
 import json
-import sys
 from pathlib import Path
 
 import edt as edt_pkg
@@ -504,15 +503,13 @@ def main(argv=None):
         # 2. Load T2w and compute bone threshold
         t2w = load_t2w(raw)
         if t2w is None:
-            print("FATAL: T2w required for skull SDF construction")
-            sys.exit(1)
+            raise ValueError("T2w required for skull SDF construction")
 
         bone_threshold, threshold_stats = compute_bone_threshold(
             t2w, brain_mask, args.bone_z,
         )
         if bone_threshold is None:
-            print("FATAL: could not compute T2w threshold")
-            sys.exit(1)
+            raise ValueError("Could not compute T2w threshold")
 
         # 3. Load atlas brain probability
         p_brain = load_atlas_brain_prob(
