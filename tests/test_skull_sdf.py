@@ -1,6 +1,7 @@
 """Tests for preprocessing/skull_sdf.py — bone threshold, growth, closing, signed EDT."""
 
 import numpy as np
+import nibabel as nib
 import pytest
 
 from preprocessing.skull_sdf import (
@@ -8,6 +9,7 @@ from preprocessing.skull_sdf import (
     compute_signed_edt,
     extract_voxel_size,
     grow_skull_interior,
+    load_atlas_brain_prob,
     morphological_close,
 )
 
@@ -288,3 +290,113 @@ class TestComputeSignedEdt:
         # Without smoothing, should have exact staircase distances
         # Voxel at (3,5,5) is 1 voxel inside the boundary → SDF = -1.0
         assert abs(sdf[3, 5, 5]) <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# load_atlas_brain_prob
+# ---------------------------------------------------------------------------
+class TestLoadAtlasBrainProb:
+    def test_3d_atlas(self, tmp_path):
+        # 3D pre-computed P(brain) volume
+        data = np.full((10, 10, 10), 0.5, dtype=np.float32)
+        img = nib.Nifti1Image(data, np.eye(4))
+        path = tmp_path / "p_brain_3d.nii"
+        nib.save(img, str(path))
+
+        result = load_atlas_brain_prob(
+            str(path), target_affine=np.eye(4), target_shape=(10, 10, 10))
+
+        assert result is not None
+        assert result.shape == (10, 10, 10)
+        assert result.dtype == np.float32
+        np.testing.assert_allclose(result, 0.5, atol=0.05)
+
+    def test_4d_atlas_sums_channels(self, tmp_path):
+        # SPM-style 4D TPM: P_brain = ch0 + ch1 + ch2
+        data = np.zeros((10, 10, 10, 6), dtype=np.float32)
+        data[:, :, :, 0] = 0.3  # GM
+        data[:, :, :, 1] = 0.3  # WM
+        data[:, :, :, 2] = 0.2  # CSF
+        data[:, :, :, 3] = 0.1  # bone
+        data[:, :, :, 4] = 0.05  # soft tissue
+        data[:, :, :, 5] = 0.05  # air
+        img = nib.Nifti1Image(data, np.eye(4))
+        path = tmp_path / "tpm_4d.nii"
+        nib.save(img, str(path))
+
+        result = load_atlas_brain_prob(
+            str(path), target_affine=np.eye(4), target_shape=(10, 10, 10))
+
+        assert result is not None
+        # GM + WM + CSF = 0.8
+        np.testing.assert_allclose(result, 0.8, atol=0.05)
+
+    def test_4d_atlas_clamps_above_one(self, tmp_path):
+        # Channels sum > 1.0 → should be clamped
+        data = np.zeros((10, 10, 10, 6), dtype=np.float32)
+        data[:, :, :, 0] = 0.5
+        data[:, :, :, 1] = 0.5
+        data[:, :, :, 2] = 0.5  # sum = 1.5
+        img = nib.Nifti1Image(data, np.eye(4))
+        path = tmp_path / "tpm_over.nii"
+        nib.save(img, str(path))
+
+        result = load_atlas_brain_prob(
+            str(path), target_affine=np.eye(4), target_shape=(10, 10, 10))
+
+        assert result is not None
+        assert np.all(result <= 1.0)
+
+    def test_missing_file_returns_none(self, tmp_path):
+        path = tmp_path / "nonexistent.nii"
+
+        result = load_atlas_brain_prob(
+            str(path), target_affine=np.eye(4), target_shape=(5, 5, 5))
+
+        assert result is None
+
+    def test_identity_affine_preserves(self, tmp_path):
+        # Identity affine, same shape → output ≈ input
+        rng = np.random.default_rng(42)
+        data = rng.uniform(0, 1, (8, 8, 8)).astype(np.float32)
+        img = nib.Nifti1Image(data, np.eye(4))
+        path = tmp_path / "identity.nii"
+        nib.save(img, str(path))
+
+        result = load_atlas_brain_prob(
+            str(path), target_affine=np.eye(4), target_shape=(8, 8, 8))
+
+        assert result is not None
+        np.testing.assert_allclose(result, data, atol=0.01)
+
+    def test_scaled_affine_resamples(self, tmp_path):
+        # Atlas at 2mm voxels, target at 1mm → output shape is target
+        data = np.full((5, 5, 5), 0.7, dtype=np.float32)
+        atlas_affine = np.diag([2.0, 2.0, 2.0, 1.0])
+        img = nib.Nifti1Image(data, atlas_affine)
+        path = tmp_path / "atlas_2mm.nii"
+        nib.save(img, str(path))
+
+        target_shape = (10, 10, 10)
+        result = load_atlas_brain_prob(
+            str(path), target_affine=np.eye(4), target_shape=target_shape)
+
+        assert result is not None
+        assert result.shape == target_shape
+        # Interior voxels should have values near 0.7
+        assert result[5, 5, 5] == pytest.approx(0.7, abs=0.1)
+
+    def test_output_clipped_0_1(self, tmp_path):
+        # Atlas with values outside [0,1] → output clipped
+        data = np.full((10, 10, 10), -0.5, dtype=np.float32)
+        data[5, 5, 5] = 2.0
+        img = nib.Nifti1Image(data, np.eye(4))
+        path = tmp_path / "out_of_range.nii"
+        nib.save(img, str(path))
+
+        result = load_atlas_brain_prob(
+            str(path), target_affine=np.eye(4), target_shape=(10, 10, 10))
+
+        assert result is not None
+        assert np.all(result >= 0.0)
+        assert np.all(result <= 1.0)

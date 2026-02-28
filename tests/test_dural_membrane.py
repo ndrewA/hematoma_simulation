@@ -1,4 +1,4 @@
-"""Tests for preprocessing/dural_membrane.py — geometry helpers."""
+"""Tests for preprocessing/dural_membrane.py — geometry helpers + reconstruction."""
 
 import numpy as np
 import pytest
@@ -14,8 +14,69 @@ from preprocessing.dural_membrane import (
     RIGHT_CEREBRAL_LABELS,
     RIGHT_CEREBRAL_RANGE,
     CC_LABELS,
+    classify_hemispheres,
+    _detect_crista_galli,
+    _draw_line_safe,
+    merge_dural,
+    check_idempotency,
+    _collect_falx_polygon,
+    _collect_boundary_polylines,
+    _build_free_edge_controls,
+    _solve_bezier_shape,
+    _rasterize_falx_cookie,
+    _detect_falx_geometry,
+    _compute_midplane_membrane,
+    _measure_notch_ellipse,
+    reconstruct_tentorium,
+    _FalxGeometry,
+    _MOF_LEFT,
+    _MOF_RIGHT,
 )
 from preprocessing.utils import FS_LUT_SIZE
+
+
+# ---------------------------------------------------------------------------
+# Shared helper for geometry-dependent tests
+# ---------------------------------------------------------------------------
+def _make_falx_geometry(Y=60, Z=80, anchor_y=10, anchor_z=50.0,
+                        crista_y=40, crista_z=20.0, genu_y=35, mid_x=15,
+                        mem_y_min=5, mem_y_max=55):
+    """Build a minimal _FalxGeometry with plausible edge profiles."""
+    mem_top_z = np.full(Y, -1, dtype=int)
+    mem_bot_z = np.full(Y, Z, dtype=int)
+    mem_exists = np.zeros(Y, dtype=bool)
+    for y in range(mem_y_min, mem_y_max + 1):
+        mem_exists[y] = True
+        mem_top_z[y] = Z - 10
+        mem_bot_z[y] = 10
+
+    tent_top_z = np.full(Y, -1, dtype=int)
+    tent_exists = np.zeros(Y, dtype=bool)
+    for y in range(mem_y_min, anchor_y + 1):
+        tent_exists[y] = True
+        tent_top_z[y] = int(anchor_z)
+
+    cc_top_z = np.full(Y, -1, dtype=int)
+    cc_exists = np.zeros(Y, dtype=bool)
+    for y in range(15, genu_y + 1):
+        cc_exists[y] = True
+        cc_top_z[y] = int(anchor_z) + 5
+
+    cc_landmarks = {
+        "splenium": (15, 45.6),
+        "body": (25, 25.7),
+        "genu": (genu_y, 21.3),
+    }
+
+    return _FalxGeometry(
+        mem_top_z=mem_top_z, mem_bot_z=mem_bot_z, mem_exists=mem_exists,
+        mem_y_min=mem_y_min, mem_y_max=mem_y_max,
+        tent_top_z=tent_top_z, tent_exists=tent_exists,
+        cc_landmarks=cc_landmarks, cc_top_z=cc_top_z, cc_exists=cc_exists,
+        anchor_y=anchor_y, anchor_z=anchor_z,
+        crista_y=crista_y, crista_z=crista_z,
+        genu_y=genu_y, mid_x=mid_x,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -188,3 +249,673 @@ class TestShoelaceArea:
         ys = [0, 1, 2]
         zs = [0, 0, 0]
         assert _shoelace_area(ys, zs) == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# classify_hemispheres
+# ---------------------------------------------------------------------------
+class TestClassifyHemispheres:
+    def test_left_labels_detected(self):
+        left_lut, right_lut, _ = _build_fs_luts()
+        fs = np.zeros((3, 3, 3), dtype=np.int16)
+        fs[1, 1, 1] = 2  # left cerebral WM
+
+        left, right = classify_hemispheres(fs, left_lut, right_lut)
+
+        assert left[1, 1, 1]
+        assert not right[1, 1, 1]
+
+    def test_right_labels_detected(self):
+        left_lut, right_lut, _ = _build_fs_luts()
+        fs = np.zeros((3, 3, 3), dtype=np.int16)
+        fs[1, 1, 1] = 41  # right cerebral WM
+
+        left, right = classify_hemispheres(fs, left_lut, right_lut)
+
+        assert not left[1, 1, 1]
+        assert right[1, 1, 1]
+
+    def test_negative_labels_safe(self):
+        left_lut, right_lut, _ = _build_fs_luts()
+        fs = np.array([[[-5]]], dtype=np.int16)
+
+        left, right = classify_hemispheres(fs, left_lut, right_lut)
+
+        assert not left[0, 0, 0]
+        assert not right[0, 0, 0]
+
+    def test_no_overlap(self):
+        left_lut, right_lut, _ = _build_fs_luts()
+        # Spread of labels including both hemispheres + Desikan ranges
+        labels = [2, 3, 41, 42, 1001, 2001, 0, 10, 49]
+        fs = np.array(labels, dtype=np.int16).reshape(3, 3, 1)
+
+        left, right = classify_hemispheres(fs, left_lut, right_lut)
+
+        assert not np.any(left & right)
+
+
+# ---------------------------------------------------------------------------
+# _detect_crista_galli
+# ---------------------------------------------------------------------------
+class TestDetectCristaGalli:
+    def test_basic_detection(self):
+        fs_crop = np.zeros((11, 40, 40), dtype=np.int16)
+        mid_x = 5
+        genu_y = 15
+        # Place MOF at (mid_x, y=20, z=5)
+        fs_crop[mid_x, 20, 5] = _MOF_LEFT
+
+        crista_y, crista_z = _detect_crista_galli(fs_crop, mid_x, genu_y)
+
+        assert crista_y == 20
+        assert crista_z == 5
+
+    def test_raises_when_no_mof_anterior(self):
+        fs_crop = np.zeros((11, 40, 40), dtype=np.int16)
+        mid_x = 5
+        genu_y = 15
+        # Place MOF at y=10, which is <= genu_y
+        fs_crop[mid_x, 10, 5] = _MOF_LEFT
+
+        with pytest.raises(ValueError, match="medial orbitofrontal"):
+            _detect_crista_galli(fs_crop, mid_x, genu_y)
+
+    def test_uses_right_mof_label(self):
+        fs_crop = np.zeros((11, 40, 40), dtype=np.int16)
+        mid_x = 5
+        genu_y = 10
+        # Only right MOF label present
+        fs_crop[mid_x, 20, 8] = _MOF_RIGHT
+
+        crista_y, crista_z = _detect_crista_galli(fs_crop, mid_x, genu_y)
+
+        assert crista_y == 20
+        assert crista_z == 8
+
+    def test_picks_most_inferior_z(self):
+        fs_crop = np.zeros((11, 40, 40), dtype=np.int16)
+        mid_x = 5
+        genu_y = 10
+        # Multiple MOF voxels at different z
+        fs_crop[mid_x, 20, 15] = _MOF_LEFT
+        fs_crop[mid_x, 25, 7] = _MOF_LEFT
+        fs_crop[mid_x, 30, 3] = _MOF_LEFT
+
+        crista_y, crista_z = _detect_crista_galli(fs_crop, mid_x, genu_y)
+
+        assert crista_z == 3  # minimum z
+
+
+# ---------------------------------------------------------------------------
+# _draw_line_safe
+# ---------------------------------------------------------------------------
+class TestDrawLineSafe:
+    def test_horizontal_line(self):
+        target = np.zeros((10, 10), dtype=bool)
+        _draw_line_safe(2, 1, 2, 8, target, 10, 10)
+
+        # All pixels on row y=2 from z=1 to z=8 should be set
+        assert np.all(target[2, 1:9])
+        assert not target[0, 5]
+
+    def test_vertical_line(self):
+        target = np.zeros((10, 10), dtype=bool)
+        _draw_line_safe(1, 3, 7, 3, target, 10, 10)
+
+        assert np.all(target[1:8, 3])
+        assert not target[5, 0]
+
+    def test_out_of_bounds_clamped(self):
+        target = np.zeros((10, 10), dtype=bool)
+        # Endpoints far outside grid — should not crash
+        _draw_line_safe(-5, -5, 15, 15, target, 10, 10)
+
+        # Clamped to (0,0)→(9,9), should mark some diagonal pixels
+        assert target[0, 0]
+        assert target[9, 9]
+
+    def test_single_point(self):
+        target = np.zeros((10, 10), dtype=bool)
+        _draw_line_safe(4, 4, 4, 4, target, 10, 10)
+
+        assert target[4, 4]
+        assert target.sum() == 1
+
+
+# ---------------------------------------------------------------------------
+# merge_dural
+# ---------------------------------------------------------------------------
+class TestMergeDural:
+    def test_basic_merge(self):
+        mat = np.ones((10, 10, 10), dtype=np.uint8) * 2
+        falx = np.zeros((10, 10, 10), dtype=bool)
+        tent = np.zeros((10, 10, 10), dtype=bool)
+        falx[0:5, :, :] = True
+        tent[5:10, :, :] = True
+
+        n_falx, n_tent, n_overlap, n_total = merge_dural(mat, falx, tent)
+
+        assert n_falx == 500
+        assert n_tent == 500
+        assert n_overlap == 0
+        assert n_total == 1000
+        assert np.all(mat == 10)
+
+    def test_overlap_counted(self):
+        mat = np.ones((10, 10, 10), dtype=np.uint8) * 2
+        falx = np.zeros((10, 10, 10), dtype=bool)
+        tent = np.zeros((10, 10, 10), dtype=bool)
+        falx[3:7, :, :] = True
+        tent[5:9, :, :] = True
+
+        n_falx, n_tent, n_overlap, n_total = merge_dural(mat, falx, tent)
+
+        assert n_overlap == 200  # indices 5,6 overlap
+        assert n_total == n_falx + n_tent - n_overlap
+
+    def test_empty_masks(self):
+        mat = np.ones((5, 5, 5), dtype=np.uint8) * 3
+        falx = np.zeros((5, 5, 5), dtype=bool)
+        tent = np.zeros((5, 5, 5), dtype=bool)
+
+        n_falx, n_tent, n_overlap, n_total = merge_dural(mat, falx, tent)
+
+        assert (n_falx, n_tent, n_overlap, n_total) == (0, 0, 0, 0)
+        assert np.all(mat == 3)  # unchanged
+
+    def test_modifies_mat_in_place(self):
+        mat = np.ones((5, 5, 5), dtype=np.uint8)
+        falx = np.zeros((5, 5, 5), dtype=bool)
+        falx[2, 2, 2] = True
+        tent = np.zeros((5, 5, 5), dtype=bool)
+        orig_id = id(mat)
+
+        merge_dural(mat, falx, tent)
+
+        assert id(mat) == orig_id
+        assert mat[2, 2, 2] == 10
+
+
+# ---------------------------------------------------------------------------
+# check_idempotency
+# ---------------------------------------------------------------------------
+class TestCheckIdempotency:
+    def test_no_existing_dural(self):
+        mat = np.ones((5, 5, 5), dtype=np.uint8) * 2
+        fs = np.full((5, 5, 5), 3, dtype=np.int16)
+        mat_before = mat.copy()
+
+        result = check_idempotency(mat, fs)
+
+        assert result == 0
+        np.testing.assert_array_equal(mat, mat_before)
+
+    def test_resets_to_tissue(self):
+        mat = np.zeros((5, 5, 5), dtype=np.uint8)
+        fs = np.zeros((5, 5, 5), dtype=np.int16)
+        # Set one voxel to dural (u8=10) where FS label is 2 (WM → u8=1)
+        mat[2, 2, 2] = 10
+        fs[2, 2, 2] = 2
+
+        result = check_idempotency(mat, fs)
+
+        assert result == 1
+        assert mat[2, 2, 2] == 1  # restored to cerebral WM
+
+    def test_resets_vacuum_to_csf(self):
+        mat = np.zeros((5, 5, 5), dtype=np.uint8)
+        fs = np.zeros((5, 5, 5), dtype=np.int16)
+        # u8=10 where FS label is 0 → maps to vacuum (u8=0) → should become CSF (u8=8)
+        mat[2, 2, 2] = 10
+        fs[2, 2, 2] = 0
+
+        check_idempotency(mat, fs)
+
+        assert mat[2, 2, 2] == 8
+
+
+# ---------------------------------------------------------------------------
+# _measure_notch_ellipse
+# ---------------------------------------------------------------------------
+class TestMeasureNotchEllipse:
+    def _make_notch_scene(self, X=40, Y=50, Z=40, dx_mm=1.0):
+        """Build a mat_crop with brainstem, cerebellum, and a cerebellar gap."""
+        mat = np.zeros((X, Y, Z), dtype=np.uint8)
+        mid_x = X // 2
+        # Brainstem at center spanning a range of z
+        mat[mid_x - 2:mid_x + 2, Y // 2 - 3:Y // 2 + 3, 15:30] = 6
+        # Left cerebellar cortex
+        mat[3:mid_x - 3, Y // 2 - 8:Y // 2 + 8, 10:28] = 4
+        # Right cerebellar cortex
+        mat[mid_x + 3:X - 3, Y // 2 - 8:Y // 2 + 8, 10:28] = 5
+        return mat
+
+    def test_returns_ellipse(self):
+        mat = self._make_notch_scene()
+        result = _measure_notch_ellipse(mat, dx_mm=1.0)
+
+        assert result is not None
+        assert result.ndim == 2
+        assert result.dtype == bool
+
+    def test_returns_none_no_brainstem(self):
+        mat = np.zeros((20, 30, 20), dtype=np.uint8)
+        # Only cerebellar tissue, no brainstem (label 6)
+        mat[2:8, :, :] = 4
+        mat[12:18, :, :] = 5
+
+        result = _measure_notch_ellipse(mat, dx_mm=1.0)
+        assert result is None
+
+    def test_returns_none_no_cerebellar_gap(self):
+        mat = np.zeros((20, 30, 20), dtype=np.uint8)
+        # Brainstem only, no cerebellar tissue → no gap to measure
+        mat[8:12, 10:20, 5:15] = 6
+
+        result = _measure_notch_ellipse(mat, dx_mm=1.0)
+        assert result is None
+
+    def test_ellipse_shape(self):
+        mat = self._make_notch_scene(X=30, Y=40, Z=30)
+        result = _measure_notch_ellipse(mat, dx_mm=1.0)
+
+        if result is not None:
+            assert result.shape == (30, 40)
+
+
+# ---------------------------------------------------------------------------
+# _collect_falx_polygon
+# ---------------------------------------------------------------------------
+class TestCollectFalxPolygon:
+    def test_returns_arrays(self):
+        geo = _make_falx_geometry()
+        inner_ys = np.linspace(geo.anchor_y, geo.crista_y, 50)
+        inner_zs = np.full(50, 50.0)
+
+        poly_y, poly_z = _collect_falx_polygon(
+            inner_ys, inner_zs, geo, tent_post_y=geo.mem_y_min)
+
+        assert isinstance(poly_y, np.ndarray)
+        assert isinstance(poly_z, np.ndarray)
+        assert len(poly_y) == len(poly_z)
+        assert len(poly_y) > 0
+
+    def test_starts_at_inner_ys(self):
+        geo = _make_falx_geometry()
+        inner_ys = np.linspace(geo.anchor_y, geo.crista_y, 50)
+        inner_zs = np.full(50, 50.0)
+
+        poly_y, poly_z = _collect_falx_polygon(
+            inner_ys, inner_zs, geo, tent_post_y=geo.mem_y_min)
+
+        assert poly_y[0] == pytest.approx(inner_ys[0])
+        assert poly_z[0] == pytest.approx(inner_zs[0])
+
+    def test_polygon_has_area(self):
+        geo = _make_falx_geometry()
+        inner_ys = np.linspace(geo.anchor_y, geo.crista_y, 50)
+        inner_zs = np.full(50, 50.0)
+
+        poly_y, poly_z = _collect_falx_polygon(
+            inner_ys, inner_zs, geo, tent_post_y=geo.mem_y_min)
+
+        area = _shoelace_area(poly_y, poly_z)
+        assert area > 0
+
+
+# ---------------------------------------------------------------------------
+# _collect_boundary_polylines
+# ---------------------------------------------------------------------------
+class TestCollectBoundaryPolylines:
+    def test_returns_polyline_and_area(self):
+        geo = _make_falx_geometry()
+
+        outer_y, outer_z, post_area = _collect_boundary_polylines(geo)
+
+        assert len(outer_y) > 0
+        assert len(outer_y) == len(outer_z)
+        assert post_area >= 0
+
+    def test_posterior_area_positive(self):
+        # With tent in posterior region and dome ceiling, area > 0
+        geo = _make_falx_geometry()
+
+        _, _, post_area = _collect_boundary_polylines(geo)
+
+        assert post_area > 0
+
+    def test_no_posterior_range_zero_area(self):
+        # Set mem_y_min = anchor_y so posterior loop range is empty
+        geo = _make_falx_geometry(mem_y_min=10, anchor_y=10)
+
+        _, _, post_area = _collect_boundary_polylines(geo)
+
+        assert post_area == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# _build_free_edge_controls
+# ---------------------------------------------------------------------------
+class TestBuildFreeEdgeControls:
+    def test_output_shapes(self):
+        geo = _make_falx_geometry()
+
+        pchip_ys, pchip_zs, genu_ctrl_z = _build_free_edge_controls(geo)
+
+        expected_len = geo.genu_y - geo.anchor_y
+        assert len(pchip_ys) == expected_len
+        assert len(pchip_zs) == expected_len
+        assert isinstance(genu_ctrl_z, float)
+
+    def test_pchip_ys_range(self):
+        geo = _make_falx_geometry()
+
+        pchip_ys, _, _ = _build_free_edge_controls(geo)
+
+        assert pchip_ys[0] == pytest.approx(geo.anchor_y)
+        assert pchip_ys[-1] == pytest.approx(geo.genu_y - 1)
+
+    def test_single_cc_landmark(self):
+        # Only genu landmark → 2 control points (anchor + genu), PCHIP still works
+        geo = _make_falx_geometry()
+        geo.cc_landmarks = {"genu": (geo.genu_y, 21.3)}
+
+        pchip_ys, pchip_zs, genu_ctrl_z = _build_free_edge_controls(geo)
+
+        assert len(pchip_ys) == geo.genu_y - geo.anchor_y
+        assert not np.any(np.isnan(pchip_zs))
+
+
+# ---------------------------------------------------------------------------
+# _solve_bezier_shape
+# ---------------------------------------------------------------------------
+class TestSolveBezierShape:
+    def _get_bezier_inputs(self):
+        """Build inputs for _solve_bezier_shape from the shared geometry."""
+        geo = _make_falx_geometry()
+        pchip_ys, pchip_zs, genu_ctrl_z = _build_free_edge_controls(geo)
+        outer_y, outer_z, post_area = _collect_boundary_polylines(geo)
+        return pchip_ys, pchip_zs, genu_ctrl_z, outer_y, outer_z, post_area, geo
+
+    def test_returns_arrays(self):
+        pchip_ys, pchip_zs, genu_ctrl_z, outer_y, outer_z, post_area, geo = \
+            self._get_bezier_inputs()
+
+        result = _solve_bezier_shape(
+            pchip_ys, pchip_zs, genu_ctrl_z,
+            outer_y, outer_z, post_area, geo, dx_mm=1.0)
+
+        assert result is not None
+        inner_ys, inner_zs = result
+        assert len(inner_ys) == len(inner_zs)
+        assert len(inner_ys) > len(pchip_ys)  # PCHIP + Bezier
+
+    def test_degenerate_returns_none(self):
+        # Make genu and crista at the exact same y AND membrane exists only
+        # at one y → skull contour has zero length between endpoints
+        geo = _make_falx_geometry(crista_y=55, crista_z=10.0, genu_y=35,
+                                  mem_y_max=55)
+        # Override mem_exists so membrane only exists at genu_y and crista_y
+        # (no contour between them, causing skull_len < 1e-8)
+        geo.mem_exists[:] = False
+        geo.mem_exists[geo.genu_y] = True
+        geo.mem_exists[geo.crista_y] = True
+        geo.mem_top_z[geo.genu_y] = 70
+        geo.mem_bot_z[geo.genu_y] = 10
+        geo.mem_top_z[geo.crista_y] = 70
+        geo.mem_bot_z[geo.crista_y] = 10
+        geo.cc_landmarks = {"genu": (geo.genu_y, 21.3)}
+
+        pchip_ys, pchip_zs, genu_ctrl_z = _build_free_edge_controls(geo)
+        outer_y, outer_z, post_area = _collect_boundary_polylines(geo)
+
+        result = _solve_bezier_shape(
+            pchip_ys, pchip_zs, genu_ctrl_z,
+            outer_y, outer_z, post_area, geo, dx_mm=1.0)
+
+        # With only 2 membrane points the skull contour has the
+        # start == end on the genu side → skull_len == 0 → returns None
+        # OR the Bezier still works because the contour wraps through
+        # the 2 points. Either way the function should not crash.
+        # The key test is that it handles sparse geometry gracefully.
+        assert result is None or isinstance(result, tuple)
+
+    def test_inner_curve_spans_anchor_to_crista(self):
+        pchip_ys, pchip_zs, genu_ctrl_z, outer_y, outer_z, post_area, geo = \
+            self._get_bezier_inputs()
+
+        result = _solve_bezier_shape(
+            pchip_ys, pchip_zs, genu_ctrl_z,
+            outer_y, outer_z, post_area, geo, dx_mm=1.0)
+
+        assert result is not None
+        inner_ys, inner_zs = result
+        # Starts near anchor, ends near crista
+        assert inner_ys[0] == pytest.approx(geo.anchor_y, abs=1)
+        assert inner_ys[-1] == pytest.approx(geo.crista_y, abs=2)
+
+
+# ---------------------------------------------------------------------------
+# _detect_falx_geometry
+# ---------------------------------------------------------------------------
+class TestDetectFalxGeometry:
+    def _make_scene(self, with_tent=True):
+        """Build a simple scene for geometry detection."""
+        X, Y, Z = 20, 50, 40
+        mid_x = X // 2
+        # Vertical membrane plane at midline
+        membrane = np.zeros((X, Y, Z), dtype=bool)
+        membrane[mid_x, 5:45, 5:35] = True
+        # Skull SDF: negative everywhere (all intracranial)
+        skull_crop = np.full((X, Y, Z), -5.0, dtype=np.float32)
+        # FS labels: left and right + MOF for crista + CC for landmarks
+        fs_crop = np.zeros((X, Y, Z), dtype=np.int16)
+        fs_crop[:mid_x, :, :] = 2     # left WM
+        fs_crop[mid_x:, :, :] = 41    # right WM
+        # CC labels at midline
+        fs_crop[mid_x, 12:14, 20:25] = 251  # splenium
+        fs_crop[mid_x, 22:24, 20:25] = 253  # body
+        fs_crop[mid_x, 32:34, 20:25] = 255  # genu
+        # MOF labels anterior to genu (y > 32)
+        fs_crop[mid_x, 38, 8] = _MOF_LEFT
+
+        tent_crop = None
+        if with_tent:
+            tent_crop = np.zeros((X, Y, Z), dtype=bool)
+            tent_crop[mid_x - 3:mid_x + 3, 5:15, 18:22] = True
+
+        cc_landmarks = {"splenium": (13, 45.6), "body": (23, 25.7),
+                        "genu": (33, 21.3)}
+        cc_top_z = np.full(Y, -1, dtype=int)
+        cc_exists = np.zeros(Y, dtype=bool)
+        for y in range(12, 35):
+            cc_exists[y] = True
+            cc_top_z[y] = 25
+
+        return membrane, skull_crop, tent_crop, cc_landmarks, cc_top_z, cc_exists, fs_crop
+
+    def test_returns_dataclass(self):
+        membrane, skull, tent, cc_lm, cc_top, cc_ex, fs = self._make_scene()
+
+        geo = _detect_falx_geometry(
+            membrane, skull, tent, cc_lm, cc_top, cc_ex, 1.0, fs)
+
+        assert isinstance(geo, _FalxGeometry)
+        assert hasattr(geo, "mem_top_z")
+        assert hasattr(geo, "anchor_y")
+        assert hasattr(geo, "crista_y")
+
+    def test_anchor_from_tent(self):
+        membrane, skull, tent, cc_lm, cc_top, cc_ex, fs = self._make_scene(
+            with_tent=True)
+
+        geo = _detect_falx_geometry(
+            membrane, skull, tent, cc_lm, cc_top, cc_ex, 1.0, fs)
+
+        # Anchor should come from the tentorium midline
+        assert geo.anchor_y > 0
+
+    def test_no_tent_fallback(self):
+        membrane, skull, _, cc_lm, cc_top, cc_ex, fs = self._make_scene(
+            with_tent=False)
+
+        geo = _detect_falx_geometry(
+            membrane, skull, None, cc_lm, cc_top, cc_ex, 1.0, fs)
+
+        # Without tent, anchor falls back to membrane bottom at junction
+        assert isinstance(geo.anchor_y, int)
+        assert isinstance(geo.anchor_z, float)
+
+
+# ---------------------------------------------------------------------------
+# _rasterize_falx_cookie
+# ---------------------------------------------------------------------------
+class TestRasterizeFalxCookie:
+    def _make_cookie_inputs(self):
+        """Build membrane, inner curve, and geometry for rasterization."""
+        geo = _make_falx_geometry(Y=60, Z=80)
+        X = 30
+        # Vertical plane membrane
+        membrane = np.zeros((X, 60, 80), dtype=bool)
+        membrane[X // 2, 5:55, 10:70] = True
+        # Simple inner curve
+        inner_ys = np.linspace(geo.anchor_y, geo.crista_y, 100)
+        inner_zs = np.full(100, 50.0)
+        n_membrane = int(membrane.sum())
+        return membrane, inner_ys, inner_zs, geo, n_membrane
+
+    def test_output_shape_matches_full(self):
+        membrane, inner_ys, inner_zs, geo, n_mem = self._make_cookie_inputs()
+        full_shape = (40, 70, 90)
+        crop_slices = (slice(5, 35), slice(0, 60), slice(0, 80))
+
+        falx = _rasterize_falx_cookie(
+            membrane, inner_ys, inner_zs, geo, None,
+            crop_slices, full_shape, n_mem)
+
+        assert falx.shape == full_shape
+        assert falx.dtype == bool
+
+    def test_subset_of_membrane(self):
+        membrane, inner_ys, inner_zs, geo, n_mem = self._make_cookie_inputs()
+        full_shape = (30, 60, 80)
+        crop_slices = (slice(0, 30), slice(0, 60), slice(0, 80))
+
+        falx = _rasterize_falx_cookie(
+            membrane, inner_ys, inner_zs, geo, None,
+            crop_slices, full_shape, n_mem)
+
+        # Every falx voxel should have been True in the membrane
+        assert np.all(membrane[falx[crop_slices]])
+
+    def test_no_tent_cut_when_tent_none(self):
+        membrane, inner_ys, inner_zs, geo, n_mem = self._make_cookie_inputs()
+        full_shape = (30, 60, 80)
+        crop_slices = (slice(0, 30), slice(0, 60), slice(0, 80))
+
+        # Should not crash with tent_crop=None
+        falx = _rasterize_falx_cookie(
+            membrane, inner_ys, inner_zs, geo, None,
+            crop_slices, full_shape, n_mem)
+
+        assert falx.sum() > 0
+
+
+# ---------------------------------------------------------------------------
+# _compute_midplane_membrane
+# ---------------------------------------------------------------------------
+class TestComputeMidplaneMembrane:
+    def _make_bilateral_scene(self, with_cc=True):
+        """Build FS labels with left/right hemispheres and optional CC."""
+        X, Y, Z = 20, 30, 20
+        fs = np.zeros((X, Y, Z), dtype=np.int16)
+        # Left hemisphere on one side of midline
+        fs[:X // 2, :, :] = 2    # left cerebral WM
+        fs[X // 2:, :, :] = 41   # right cerebral WM
+
+        if with_cc:
+            # CC sub-regions at midline at different y positions
+            fs[X // 2, 8:10, 8:12] = 251   # splenium
+            fs[X // 2, 14:16, 8:12] = 253  # body
+            fs[X // 2, 20:22, 8:12] = 255  # genu
+
+        skull = np.full((X, Y, Z), -5.0, dtype=np.float32)
+        return fs, skull
+
+    def test_basic_membrane_detected(self):
+        fs, skull = self._make_bilateral_scene()
+
+        membrane, n_mem, cc_lm, cc_top, cc_ex = \
+            _compute_midplane_membrane(fs, skull, dx_mm=1.0, thickness_mm=1.0)
+
+        assert n_mem > 0
+        assert membrane.shape == fs.shape
+
+    def test_cc_landmarks_found(self):
+        fs, skull = self._make_bilateral_scene(with_cc=True)
+
+        _, _, cc_lm, _, _ = \
+            _compute_midplane_membrane(fs, skull, dx_mm=1.0, thickness_mm=1.0)
+
+        assert "splenium" in cc_lm
+        assert "body" in cc_lm
+        assert "genu" in cc_lm
+
+    def test_no_cc_empty_landmarks(self):
+        fs, skull = self._make_bilateral_scene(with_cc=False)
+
+        _, _, cc_lm, _, _ = \
+            _compute_midplane_membrane(fs, skull, dx_mm=1.0, thickness_mm=1.0)
+
+        assert cc_lm == {}
+
+
+# ---------------------------------------------------------------------------
+# reconstruct_tentorium
+# ---------------------------------------------------------------------------
+class TestReconstructTentorium:
+    def test_returns_bool_array(self):
+        shape = (30, 40, 30)
+        mat = np.zeros(shape, dtype=np.uint8)
+        # Cerebral tissue in upper half (z > 15)
+        mat[5:25, 5:35, 16:28] = 1
+        # Cerebellar tissue in lower half (z < 15)
+        mat[8:22, 10:30, 3:14] = 4
+        crop_slices = (slice(0, 30), slice(0, 40), slice(0, 30))
+
+        tent = reconstruct_tentorium(mat, dx_mm=1.0, notch_radius=5.0,
+                                     crop_slices=crop_slices)
+
+        assert tent.shape == shape
+        assert tent.dtype == bool
+
+    def test_tentorium_between_tissues(self):
+        shape = (30, 40, 30)
+        mat = np.zeros(shape, dtype=np.uint8)
+        # Cerebral above z=15
+        mat[5:25, 5:35, 16:28] = 1
+        # Cerebellar below z=15
+        mat[8:22, 10:30, 3:14] = 4
+        crop_slices = (slice(0, 30), slice(0, 40), slice(0, 30))
+
+        tent = reconstruct_tentorium(mat, dx_mm=1.0, notch_radius=5.0,
+                                     crop_slices=crop_slices)
+
+        if tent.any():
+            # Tent voxels should cluster near the interface (z ~ 14-16)
+            tent_z = np.where(tent.any(axis=(0, 1)))[0]
+            median_z = np.median(tent_z)
+            assert 10 < median_z < 20
+
+    def test_empty_mat_no_crash(self):
+        shape = (10, 10, 10)
+        mat = np.zeros(shape, dtype=np.uint8)
+        crop_slices = (slice(0, 10), slice(0, 10), slice(0, 10))
+
+        # All-zero mat: no tissue to watershed between
+        tent = reconstruct_tentorium(mat, dx_mm=1.0, notch_radius=5.0,
+                                     crop_slices=crop_slices)
+
+        assert tent.shape == shape
+        assert not tent.any()

@@ -8,6 +8,7 @@ from preprocessing.fiber_orientation import (
     compute_structure_tensor,
     apply_wm_mask,
     build_wm_mask,
+    threshold_fractions,
 )
 from preprocessing.utils import FS_LUT_SIZE
 
@@ -178,3 +179,118 @@ class TestBuildWmMask:
         assert is_aniso[5, 5, 5]
         assert fs_labels[5, 5, 5] == 2
         assert not is_aniso[0, 0, 0]  # label 0 → not anisotropic
+
+    def test_scaled_affine(self):
+        # diff_affine at 2x scale: voxel (2,2,2) maps to FS voxel (4,4,4)
+        diff_affine = np.diag([2.0, 2.0, 2.0, 1.0])
+        fs_affine = np.eye(4)
+        fs_data = np.zeros((10, 10, 10), dtype=np.int16)
+        fs_data[4, 4, 4] = 2  # cerebral WM
+        aniso_lut = _build_aniso_lut()
+
+        is_aniso, fs_labels = build_wm_mask(
+            diff_affine, fs_data, fs_affine, (5, 5, 5), aniso_lut)
+
+        assert is_aniso[2, 2, 2]
+        assert fs_labels[2, 2, 2] == 2
+
+    def test_translated_affine(self):
+        # diff_affine shifted by +3 voxels in each axis
+        diff_affine = np.eye(4)
+        diff_affine[:3, 3] = [3.0, 3.0, 3.0]
+        fs_affine = np.eye(4)
+        fs_data = np.zeros((10, 10, 10), dtype=np.int16)
+        fs_data[3, 3, 3] = 42  # right cortical GM (not anisotropic)
+        fs_data[5, 5, 5] = 2   # cerebral WM (anisotropic)
+        aniso_lut = _build_aniso_lut()
+
+        is_aniso, fs_labels = build_wm_mask(
+            diff_affine, fs_data, fs_affine, (5, 5, 5), aniso_lut)
+
+        # diff voxel (0,0,0) → physical (3,3,3) → FS voxel (3,3,3) → label 42 (GM)
+        assert not is_aniso[0, 0, 0]
+        assert fs_labels[0, 0, 0] == 42
+        # diff voxel (2,2,2) → physical (5,5,5) → FS voxel (5,5,5) → label 2 (WM)
+        assert is_aniso[2, 2, 2]
+        assert fs_labels[2, 2, 2] == 2
+
+    def test_oob_clipped(self):
+        # diff_affine that maps all voxels far outside FS bounds
+        diff_affine = np.eye(4)
+        diff_affine[:3, 3] = [100.0, 100.0, 100.0]
+        fs_affine = np.eye(4)
+        fs_data = np.zeros((10, 10, 10), dtype=np.int16)
+        fs_data[9, 9, 9] = 2  # only edge voxel has WM label
+        aniso_lut = _build_aniso_lut()
+
+        is_aniso, fs_labels = build_wm_mask(
+            diff_affine, fs_data, fs_affine, (3, 3, 3), aniso_lut)
+
+        # All diff voxels map to FS edge (9,9,9) after clipping
+        assert np.all(is_aniso)
+        assert np.all(fs_labels == 2)
+
+    def test_negative_labels_safe(self):
+        # FS data with negative values should be clipped to 0
+        affine = np.eye(4)
+        fs_data = np.full((5, 5, 5), -10, dtype=np.int16)
+        aniso_lut = _build_aniso_lut()
+
+        is_aniso, fs_labels = build_wm_mask(
+            affine, fs_data, affine, (5, 5, 5), aniso_lut)
+
+        # Negative labels clipped to 0, which is not anisotropic
+        assert not np.any(is_aniso)
+
+
+# ---------------------------------------------------------------------------
+# threshold_fractions
+# ---------------------------------------------------------------------------
+class TestThresholdFractions:
+    def test_zeros_below_threshold(self):
+        shape = (3, 3, 3)
+        fracs = [
+            np.full(shape, 0.01, dtype=np.float32),
+            np.full(shape, 0.1, dtype=np.float32),
+            np.full(shape, 0.5, dtype=np.float32),
+        ]
+        brain_mask = np.ones(shape, dtype=bool)
+
+        threshold_fractions(fracs, 0.05, brain_mask)
+
+        np.testing.assert_allclose(fracs[0], 0.0)   # 0.01 < 0.05 → zeroed
+        np.testing.assert_allclose(fracs[1], 0.1)    # 0.1 >= 0.05 → kept
+        np.testing.assert_allclose(fracs[2], 0.5)    # 0.5 >= 0.05 → kept
+
+    def test_preserves_above_threshold(self):
+        shape = (2, 2, 2)
+        fracs = [np.full(shape, 0.8, dtype=np.float32) for _ in range(3)]
+        brain_mask = np.ones(shape, dtype=bool)
+
+        threshold_fractions(fracs, 0.5, brain_mask)
+
+        for f in fracs:
+            np.testing.assert_allclose(f, 0.8)
+
+    def test_ignores_outside_brain(self):
+        shape = (2, 2, 2)
+        fracs = [np.full(shape, 0.01, dtype=np.float32) for _ in range(3)]
+        brain_mask = np.zeros(shape, dtype=bool)  # nothing in brain
+
+        threshold_fractions(fracs, 0.05, brain_mask)
+
+        # Outside brain → not zeroed despite being below threshold
+        for f in fracs:
+            np.testing.assert_allclose(f, 0.01)
+
+    def test_modifies_in_place(self):
+        shape = (2, 2, 2)
+        original = np.full(shape, 0.01, dtype=np.float32)
+        orig_id = id(original)
+        fracs = [original, np.zeros(shape, dtype=np.float32),
+                 np.zeros(shape, dtype=np.float32)]
+        brain_mask = np.ones(shape, dtype=bool)
+
+        threshold_fractions(fracs, 0.05, brain_mask)
+
+        assert id(fracs[0]) == orig_id

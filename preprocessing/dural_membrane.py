@@ -933,6 +933,9 @@ def reconstruct_tentorium(mat, dx_mm, notch_radius, crop_slices,
     cerebellar_lut[[4, 5]] = True
     cerebellar_crop = cerebellar_lut[mat_crop]
 
+    if not cerebral_crop.any() or not cerebellar_crop.any():
+        return np.zeros(mat.shape, dtype=bool)
+
     print("Computing EDT for cerebral+cerebellar tissue (cropped, threaded)...")
     with step("EDT pair (cerebral/cerebellar)"):
         with ThreadPoolExecutor(max_workers=2) as pool:
