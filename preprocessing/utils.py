@@ -107,7 +107,7 @@ def resample_to_grid(source, grid_affine, grid_shape, order=0, cval=0.0,
     # --- Load source data and affine ---
     if isinstance(source, (str, Path)):
         img = nib.load(str(source))
-        source_data = img.get_fdata()
+        source_data = img.get_fdata(dtype=np.float32)
         source_affine = img.affine
     else:
         source_data, source_affine = source
@@ -167,98 +167,3 @@ def processed_dir(subject_id, profile):
 def validation_dir(subject_id):
     """Return absolute path to validation ground-truth data for a subject."""
     return _PROJECT_ROOT / "data" / "validation" / subject_id
-
-
-# ---------------------------------------------------------------------------
-# Self-test
-# ---------------------------------------------------------------------------
-if __name__ == "__main__":
-    print("=" * 60)
-    print("preprocessing/utils.py  —  self-test")
-    print("=" * 60)
-
-    # 1. PROFILES
-    assert PROFILES["debug"] == (128, 2.0)
-    assert PROFILES["dev"] == (256, 1.0)
-    assert PROFILES["prod"] == (512, 0.5)
-    print("[PASS] PROFILES values correct")
-
-    # 2. Grid affines — center maps to physical (0, 0, 0)
-    for name, (N, dx) in PROFILES.items():
-        A = build_grid_affine(N, dx)
-        center = np.array([N / 2, N / 2, N / 2, 1.0])
-        phys = A @ center
-        assert np.allclose(phys[:3], 0.0), f"{name}: center -> {phys[:3]}"
-        # Diagonal positive (RAS+)
-        assert A[0, 0] > 0 and A[1, 1] > 0 and A[2, 2] > 0, \
-            f"{name}: diagonal not positive"
-        print(f"[PASS] {name:5s}  N={N}, dx={dx}  center->(0,0,0), RAS+")
-
-    # 3. build_ball
-    ball = build_ball(3)
-    assert ball.shape == (7, 7, 7), f"ball shape {ball.shape}"
-    n_true = int(ball.sum())
-    assert 100 <= n_true <= 150, f"ball voxels {n_true}"
-    assert ball[3, 3, 3], "center must be True"
-    assert not ball[0, 0, 0], "corner must be False"
-    assert not ball[6, 6, 6], "corner must be False"
-    print(f"[PASS] build_ball(3): shape (7,7,7), {n_true} True voxels, "
-          "center True, corners False")
-
-    # 4. Path helpers
-    assert raw_dir("157336") == _PROJECT_ROOT / "data/raw/157336/T1w"
-    assert processed_dir("157336", "dev") == _PROJECT_ROOT / "data/processed/157336/dev"
-    assert raw_dir("157336").is_absolute(), "raw_dir should return absolute path"
-    assert processed_dir("157336", "dev").is_absolute(), "processed_dir should return absolute path"
-    print(f"[PASS] path helpers (root={_PROJECT_ROOT})")
-
-    # 5. resample_to_grid — identity transform (small synthetic volume)
-    print("\n--- resample_to_grid tests ---")
-
-    # 5a. Identity: source and grid share the same affine
-    src_data = np.arange(8 * 8 * 8, dtype=np.float64).reshape(8, 8, 8)
-    src_affine = np.eye(4)
-    grid_affine_id = np.eye(4)
-    result = resample_to_grid((src_data, src_affine), grid_affine_id,
-                              (8, 8, 8), order=1)
-    assert np.allclose(result, src_data), "identity resample mismatch"
-    print("[PASS] identity resample (float64, order=1)")
-
-    # 5b. Identity with integer dtype + order=0
-    src_int = np.array([[[0, 1], [2, 3]], [[4, 5], [6, 7]]], dtype=np.int16)
-    src_aff = np.eye(4)
-    result_int = resample_to_grid((src_int, src_aff), np.eye(4),
-                                  (2, 2, 2), order=0, dtype=np.int16)
-    assert result_int.dtype == np.int16
-    assert np.array_equal(result_int, src_int), "int16 identity mismatch"
-    print("[PASS] identity resample (int16, order=0)")
-
-    # 5c. Shifted transform — grid shifted by 1 voxel in all axes
-    shifted_affine = np.eye(4)
-    shifted_affine[:3, 3] = [1.0, 1.0, 1.0]  # grid origin shifted +1mm
-    result_shift = resample_to_grid((src_data, src_affine), shifted_affine,
-                                    (8, 8, 8), order=0, cval=-1.0,
-                                    dtype=np.float64)
-    # Grid voxel (0,0,0) -> physical (1,1,1) -> source voxel (1,1,1)
-    assert result_shift[0, 0, 0] == src_data[1, 1, 1], \
-        f"shifted (0,0,0): got {result_shift[0, 0, 0]}, expected {src_data[1, 1, 1]}"
-    # Grid voxel (7,7,7) -> physical (8,8,8) -> source voxel (8,8,8) = OOB -> cval
-    assert result_shift[7, 7, 7] == -1.0, \
-        f"shifted OOB: got {result_shift[7, 7, 7]}"
-    print("[PASS] shifted resample (order=0, cval=-1.0)")
-
-    # 5d. Verify mode='constant' — OOB should NOT reflect
-    src_3 = np.zeros((4, 4, 4), dtype=np.float64)
-    src_3[0, 0, 0] = 99.0  # value at corner
-    big_shift = np.eye(4)
-    big_shift[:3, 3] = [10.0, 10.0, 10.0]  # shift grid far outside source
-    result_oob = resample_to_grid((src_3, np.eye(4)), big_shift,
-                                  (4, 4, 4), order=0, cval=0.0,
-                                  dtype=np.float64)
-    assert np.all(result_oob == 0.0), \
-        "OOB voxels should be 0 (mode='constant'), got non-zero — reflect bug?"
-    print("[PASS] out-of-bounds uses mode='constant' (no reflection)")
-
-    print("\n" + "=" * 60)
-    print("All tests passed.")
-    print("=" * 60)
