@@ -116,9 +116,7 @@ def launch(subject_id, profile):
         win_w, win_h = window.get_window_shape()
 
         if win_w != buf_size[0] or win_h != buf_size[1]:
-            buf.destroy()
             buf = ti.Vector.field(3, dtype=ti.f32, shape=(win_w, win_h))
-            display.destroy()
             display = ti.Vector.field(3, dtype=ti.f32, shape=(win_w, win_h))
             buf_size = [win_w, win_h]
 
