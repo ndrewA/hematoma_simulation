@@ -1,10 +1,13 @@
 """Tests for preprocessing/utils.py — grid construction, resampling, structuring elements."""
 
+import argparse
+
 import numpy as np
 import pytest
 
 from preprocessing.utils import (
-    PROFILES, build_grid_affine, resample_to_grid, build_ball,
+    PROFILES, add_grid_args, build_grid_affine, resample_to_grid,
+    resolve_grid_args, build_ball,
     raw_dir, processed_dir, validation_dir,
 )
 
@@ -131,3 +134,75 @@ class TestPathHelpers:
     def test_validation_dir_structure(self):
         p = validation_dir("157336")
         assert p.parts[-2:] == ("validation", "157336")
+
+
+# ---------------------------------------------------------------------------
+# add_grid_args / resolve_grid_args
+# ---------------------------------------------------------------------------
+def _build_parser():
+    """Build a fresh argparse parser with grid args."""
+    parser = argparse.ArgumentParser()
+    add_grid_args(parser)
+    return parser
+
+
+class TestAddGridArgs:
+    def test_subject_required(self):
+        parser = _build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args([])
+
+    def test_profile_choices(self):
+        parser = _build_parser()
+        args = parser.parse_args(["--subject", "1234", "--profile", "debug"])
+        assert args.profile == "debug"
+
+    def test_profile_invalid_rejected(self):
+        parser = _build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(["--subject", "1234", "--profile", "invalid"])
+
+    def test_dx_accepted(self):
+        parser = _build_parser()
+        args = parser.parse_args(["--subject", "1234", "--dx", "0.5",
+                                  "--grid-size", "512"])
+        assert args.dx == 0.5
+        assert args.grid_size == 512
+
+    def test_profile_dx_mutually_exclusive(self):
+        parser = _build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(["--subject", "1234", "--profile", "debug",
+                               "--dx", "0.5"])
+
+
+class TestResolveGridArgs:
+    def test_default_is_debug(self):
+        parser = _build_parser()
+        args = parser.parse_args(["--subject", "1234"])
+        resolve_grid_args(args, parser)
+        assert args.profile == "debug"
+        assert args.N == 128
+        assert args.dx == 2.0
+
+    def test_profile_prod(self):
+        parser = _build_parser()
+        args = parser.parse_args(["--subject", "1234", "--profile", "prod"])
+        resolve_grid_args(args, parser)
+        assert args.N == 512
+        assert args.dx == 0.5
+
+    def test_custom_dx_grid_size(self):
+        parser = _build_parser()
+        args = parser.parse_args(["--subject", "1234", "--dx", "0.75",
+                                  "--grid-size", "300"])
+        resolve_grid_args(args, parser)
+        assert args.N == 300
+        assert args.dx == 0.75
+        assert args.profile == "custom_300_0.75"
+
+    def test_dx_without_grid_size_errors(self):
+        parser = _build_parser()
+        args = parser.parse_args(["--subject", "1234", "--dx", "0.5"])
+        with pytest.raises(SystemExit):
+            resolve_grid_args(args, parser)

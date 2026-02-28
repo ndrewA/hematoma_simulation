@@ -641,6 +641,14 @@ class TestCheckV5:
         check_v5(ctx)
         assert ctx.results[-1]["status"] == "WARN"
 
+    def test_no_sdf_negative_fails(self):
+        mat = np.ones((10, 10, 10), dtype=np.uint8)
+        sdf = np.ones((10, 10, 10), dtype=np.float32)  # all positive
+        ctx = _make_ctx(mat, sdf=sdf, dx=10.0)
+        check_v5(ctx)
+        assert ctx.results[-1]["status"] == "WARN"
+        assert "no SDF<0" in ctx.results[-1]["value"]
+
 
 class TestCheckV6:
     def test_reports_census(self):
@@ -809,6 +817,14 @@ class TestCheckC7:
         check_c7(ctx)
         assert ctx.results[-1]["status"] == "PASS"
         assert "skipped" in ctx.results[-1]["value"]
+
+    def test_no_brainstem_skips(self):
+        mat = np.zeros((10, 10, 10), dtype=np.uint8)
+        mat[2:8, 2:8, 2:8] = 8  # CSF but no brainstem (label 6)
+        ctx = _make_ctx(mat)
+        check_c7(ctx)
+        assert ctx.results[-1]["status"] == "PASS"
+        assert "skipped (no brainstem)" in ctx.results[-1]["value"]
 
 
 class TestCheckC8:
@@ -1391,3 +1407,60 @@ class TestCheckH10:
         ctx = _make_header_ctx(N=10, dx=1.0, affine=affine)
         check_h10(ctx)
         assert ctx.results[-1]["status"] == "CRITICAL"
+
+    def test_fiber_inside_passes(self):
+        N = 10
+        dx = 1.0
+        mat_affine = np.diag([dx, dx, dx, 1.0])
+        mat_affine[:3, 3] = -N * dx / 2.0
+        # Fiber affine: ACPC (0,0,0) maps inside fiber volume
+        fiber_data = np.ones((20, 20, 20, 6), dtype=np.float32)
+        fiber_affine = np.diag([1.0, 1.0, 1.0, 1.0])
+        fiber_affine[:3, 3] = -10.0  # center at origin
+        fiber_img = nib.Nifti1Image(fiber_data, fiber_affine)
+        ctx = _make_header_ctx(N=N, dx=dx, fiber_img=fiber_img)
+        check_h10(ctx)
+        assert ctx.results[-1]["status"] == "PASS"
+
+    def test_fiber_outside_fails(self):
+        N = 10
+        dx = 1.0
+        # Fiber affine: large offset so ACPC (0,0,0) maps outside
+        fiber_data = np.ones((5, 5, 5, 6), dtype=np.float32)
+        fiber_affine = np.diag([1.0, 1.0, 1.0, 1.0])
+        fiber_affine[:3, 3] = 100.0  # far away
+        fiber_img = nib.Nifti1Image(fiber_data, fiber_affine)
+        ctx = _make_header_ctx(N=N, dx=dx, fiber_img=fiber_img)
+        check_h10(ctx)
+        assert ctx.results[-1]["status"] == "CRITICAL"
+        assert "ACPC outside fiber" in ctx.results[-1]["value"]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# C5 — CC boundary masking
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestCheckC5BoundaryMasking:
+    def test_cc_boundary_masking(self, tmp_path):
+        N = 20
+        mat = np.zeros((N, N, N), dtype=np.uint8)
+        sdf = -np.ones((N, N, N), dtype=np.float32)
+        mid_x = N // 2
+        cc_z_sup = 10  # CC extends up to z=10
+
+        # Fissure voxels: CSF at midline above and below cc_z_sup
+        mat[mid_x, 5:15, 3:8] = 8    # below CC — should be excluded
+        mat[mid_x, 5:15, 12:18] = 8  # above CC — should be counted
+        # Dural covering above CC
+        mat[mid_x, 5:15, 12:18] = 10
+
+        ctx = _make_ctx(mat, sdf=sdf)
+        # Simulate fs path existence
+        ctx.paths["fs"] = tmp_path / "fs.nii.gz"
+        ctx.paths["fs"].touch()
+        # Pre-populate cache with cc_z_sup
+        ctx._cache["fs_data"] = {"cc_z_sup": cc_z_sup}
+
+        check_c5(ctx)
+        # With dural covering above CC, should pass
+        assert ctx.results[-1]["status"] == "PASS"

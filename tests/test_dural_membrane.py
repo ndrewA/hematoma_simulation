@@ -2,6 +2,7 @@
 
 import numpy as np
 import pytest
+from scipy.ndimage import binary_erosion
 
 from preprocessing.dural_membrane import (
     _build_fs_luts,
@@ -27,6 +28,10 @@ from preprocessing.dural_membrane import (
     _detect_falx_geometry,
     _compute_midplane_membrane,
     _measure_notch_ellipse,
+    print_membrane_continuity,
+    print_csf_components,
+    print_thickness_estimate,
+    print_junction_thickness,
     reconstruct_falx,
     reconstruct_tentorium,
     _FalxGeometry,
@@ -931,3 +936,144 @@ class TestReconstructFalxRegression:
         result = reconstruct_falx(mat, fs, skull_sdf, dx_mm=1.0,
                                   crop_slices=crop_slices)
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# print_membrane_continuity
+# ---------------------------------------------------------------------------
+class TestPrintMembraneContinuity:
+    def test_single_component(self, capsys):
+        falx = np.zeros((10, 10, 10), dtype=bool)
+        falx[5, 3:7, 3:7] = True  # one connected blob
+        tent = np.zeros((10, 10, 10), dtype=bool)  # empty
+
+        print_membrane_continuity(falx, tent, dx_mm=1.0)
+        out = capsys.readouterr().out
+        assert "1 components" in out
+        assert "100.0%" in out
+        assert "skipped" in out  # tent should be skipped
+
+    def test_multiple_components(self, capsys):
+        falx = np.zeros((20, 20, 20), dtype=bool)
+        falx[10, 2:5, 2:5] = True   # blob 1
+        falx[10, 15:18, 15:18] = True  # blob 2 (disconnected)
+        tent = np.zeros((20, 20, 20), dtype=bool)
+
+        print_membrane_continuity(falx, tent, dx_mm=1.0)
+        out = capsys.readouterr().out
+        assert "2 components" in out
+        assert "second:" in out
+
+    def test_empty_masks(self, capsys):
+        falx = np.zeros((5, 5, 5), dtype=bool)
+        tent = np.zeros((5, 5, 5), dtype=bool)
+
+        print_membrane_continuity(falx, tent, dx_mm=1.0)
+        out = capsys.readouterr().out
+        assert out.count("skipped") >= 2
+
+
+# ---------------------------------------------------------------------------
+# print_csf_components
+# ---------------------------------------------------------------------------
+class TestPrintCsfComponents:
+    def test_two_blobs(self, capsys):
+        mat = np.zeros((20, 20, 20), dtype=np.uint8)
+        mat[2:5, 2:5, 2:5] = 8    # CSF blob 1
+        mat[15:18, 15:18, 15:18] = 8  # CSF blob 2
+
+        print_csf_components(mat, dx_mm=1.0)
+        out = capsys.readouterr().out
+        assert "#1:" in out
+        assert "#2:" in out
+        assert "Total: 2 components" in out
+
+    def test_no_csf(self, capsys):
+        mat = np.zeros((5, 5, 5), dtype=np.uint8)
+
+        print_csf_components(mat, dx_mm=1.0)
+        out = capsys.readouterr().out
+        assert "skipped (0 voxels)" in out
+
+
+# ---------------------------------------------------------------------------
+# print_thickness_estimate
+# ---------------------------------------------------------------------------
+class TestPrintThicknessEstimate:
+    def test_thick_slab(self, capsys):
+        falx = np.zeros((20, 20, 20), dtype=bool)
+        falx[8:12, 3:17, 3:17] = True  # 4-voxel thick slab
+        tent = np.zeros((20, 20, 20), dtype=bool)
+
+        print_thickness_estimate(falx, tent, dx_mm=1.0)
+        out = capsys.readouterr().out
+        assert "Falx: ~" in out
+        assert "skipped" in out  # tent
+
+    def test_thin_plane(self, capsys):
+        falx = np.zeros((20, 20, 20), dtype=bool)
+        falx[10, 3:17, 3:17] = True  # 1-voxel thick plane
+        tent = np.zeros((20, 20, 20), dtype=bool)
+
+        print_thickness_estimate(falx, tent, dx_mm=1.0)
+        out = capsys.readouterr().out
+        # 1-voxel thick: no interior after erosion → n_surface = n → thickness formula
+        n = int(falx.sum())
+        eroded = binary_erosion(falx)
+        n_interior = int(eroded.sum())
+        if n_interior == 0:
+            # All surface: thickness = n / (n/2) * dx = 2*dx
+            assert "Falx: ~2.00 mm" in out
+        else:
+            assert "Falx: ~" in out
+
+    def test_empty(self, capsys):
+        falx = np.zeros((5, 5, 5), dtype=bool)
+        tent = np.zeros((5, 5, 5), dtype=bool)
+
+        print_thickness_estimate(falx, tent, dx_mm=1.0)
+        out = capsys.readouterr().out
+        assert out.count("skipped") >= 2
+
+
+# ---------------------------------------------------------------------------
+# print_junction_thickness
+# ---------------------------------------------------------------------------
+class TestPrintJunctionThickness:
+    def test_overlap_with_warning(self, capsys):
+        falx = np.zeros((20, 20, 20), dtype=bool)
+        tent = np.zeros((20, 20, 20), dtype=bool)
+        mat = np.ones((20, 20, 20), dtype=np.uint8) * 10
+        # 4 contiguous z-voxels overlap in one column
+        falx[10, 10, 5:9] = True
+        tent[10, 10, 5:9] = True
+
+        print_junction_thickness(falx, tent, dx_mm=1.0, mat=mat)
+        out = capsys.readouterr().out
+        assert "Overlap: 4" in out
+        assert "Max z-run: 4" in out
+        assert "WARNING" in out
+
+    def test_no_overlap(self, capsys):
+        falx = np.zeros((10, 10, 10), dtype=bool)
+        tent = np.zeros((10, 10, 10), dtype=bool)
+        mat = np.ones((10, 10, 10), dtype=np.uint8)
+        falx[5, 5, 2:5] = True
+        tent[5, 5, 7:9] = True  # no overlap
+
+        print_junction_thickness(falx, tent, dx_mm=1.0, mat=mat)
+        out = capsys.readouterr().out
+        assert "No overlap" in out
+
+    def test_short_run_no_warning(self, capsys):
+        falx = np.zeros((10, 10, 10), dtype=bool)
+        tent = np.zeros((10, 10, 10), dtype=bool)
+        mat = np.ones((10, 10, 10), dtype=np.uint8) * 10
+        # 2 contiguous z-voxels overlap
+        falx[5, 5, 4:6] = True
+        tent[5, 5, 4:6] = True
+
+        print_junction_thickness(falx, tent, dx_mm=1.0, mat=mat)
+        out = capsys.readouterr().out
+        assert "Max z-run: 2" in out
+        assert "WARNING" not in out
