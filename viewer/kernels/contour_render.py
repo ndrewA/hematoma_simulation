@@ -2,21 +2,7 @@
 
 import taichi as ti
 
-
-@ti.func
-def _get_slice_dims(vol: ti.template(), axis: int):
-    dim_u = vol.shape[0]
-    dim_v = vol.shape[1]
-    if axis == 2:
-        dim_u = vol.shape[0]
-        dim_v = vol.shape[1]
-    elif axis == 1:
-        dim_u = vol.shape[0]
-        dim_v = vol.shape[2]
-    else:
-        dim_u = vol.shape[1]
-        dim_v = vol.shape[2]
-    return dim_u, dim_v
+from viewer.kernels.common import get_slice_dims as _get_slice_dims
 
 
 @ti.func

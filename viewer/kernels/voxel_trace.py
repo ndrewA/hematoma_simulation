@@ -210,4 +210,7 @@ def voxel_trace(
             # Blend accumulated color with background
             color = acc_color + bg * (1.0 - acc_alpha)
 
-        buf[px0 + px, py0 + py] = color
+        bx = px0 + px
+        by = py0 + py
+        if 0 <= bx < buf.shape[0] and 0 <= by < buf.shape[1]:
+            buf[bx, by] = color

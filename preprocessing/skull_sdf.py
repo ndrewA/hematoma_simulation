@@ -36,7 +36,6 @@ from scipy.ndimage import (
 
 from preprocessing.profiling import step
 from preprocessing.utils import (
-    PROFILES,
     _PROJECT_ROOT,
     add_grid_args,
     processed_dir,
@@ -552,9 +551,10 @@ def main(argv=None):
     # 7. Resample to simulation grid
     out_dir = processed_dir(args.subject, args.profile)
     grid_affine, N_meta = load_grid_meta(out_dir)
-    assert N_meta == args.N, (
-        f"grid_meta.json N={N_meta} does not match profile N={args.N}"
-    )
+    if N_meta != args.N:
+        raise ValueError(
+            f"grid_meta.json N={N_meta} does not match profile N={args.N}"
+        )
     grid_shape = (N_meta, N_meta, N_meta)
 
     with step("resample to grid"):

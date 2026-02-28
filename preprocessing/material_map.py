@@ -13,7 +13,6 @@ import numpy as np
 
 from preprocessing.utils import (
     FS_LUT_SIZE,
-    PROFILES,
     add_grid_args,
     processed_dir,
     resolve_grid_args,
@@ -128,10 +127,11 @@ def build_lut():
         The FS labels covered by DIRECT_MAP (for warning logic).
     """
     lut = np.full(FS_LUT_SIZE, _SENTINEL, dtype=np.uint8)
-    for fs_label, u8_class in DIRECT_MAP.items():
+    for fs_label, u8_class in FALLBACK_MAP.items():
         if fs_label < FS_LUT_SIZE:
             lut[fs_label] = u8_class
-    for fs_label, u8_class in FALLBACK_MAP.items():
+    # DIRECT_MAP applied second so it always wins over FALLBACK_MAP
+    for fs_label, u8_class in DIRECT_MAP.items():
         if fs_label < FS_LUT_SIZE:
             lut[fs_label] = u8_class
     return lut, set(DIRECT_MAP.keys())

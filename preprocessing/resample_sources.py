@@ -17,7 +17,6 @@ import numpy as np
 
 from preprocessing.profiling import step
 from preprocessing.utils import (
-    PROFILES,
     add_grid_args,
     build_grid_affine,
     processed_dir,

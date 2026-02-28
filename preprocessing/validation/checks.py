@@ -1280,4 +1280,4 @@ def check_g3(ctx):
 # ---------------------------------------------------------------------------
 # Populate lookup dict after all decorations
 # ---------------------------------------------------------------------------
-_REGISTRY_BY_ID = {d.check_id: d for d in _REGISTRY}
+_REGISTRY_BY_ID.update({d.check_id: d for d in _REGISTRY})

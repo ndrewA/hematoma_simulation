@@ -3,8 +3,6 @@
 import math
 import numpy as np
 import taichi as ti
-import taichi.math as tm
-
 from viewer.state import ViewState, OrbitalCamera, LayoutManager, LayoutMode
 from viewer.data import ViewerData
 from viewer.layers import Layer, LayerType
@@ -17,6 +15,7 @@ from viewer.kernels.slice_render import categorical_slice, scalar_slice
 from viewer.kernels.voxel_trace import voxel_trace, N_GROUPS
 from viewer.kernels.dec_render import dec_slice
 from viewer.kernels.contour_render import contour_slice
+from viewer.kernels.crosshair_3d import crosshair_3d
 from viewer.input import process_input
 
 
@@ -95,11 +94,11 @@ def launch(subject_id, profile):
     display_size = [init_w, init_h]
 
     print("Controls:")
-    print("  Click slice: set crosshair   Drag 3D: orbit   WASD: orbit")
-    print("  Up/Down: scroll slices       +/-: zoom         Tab: layout mode")
-    print("  1-6: toggle layers           Enter: fullscreen")
-    print("  H: toggle UI                 Esc: quit")
-    print(f"  Layers: {', '.join(f'{i+1}={l.name}' for i, l in enumerate(layers))}")
+    layer_keys = 'FGZXCV'
+    print("  Left-click slice: crosshair  Right-drag slice: pan  R: reset view")
+    print("  Up/Down: scroll slices       E/Q: zoom in/out     Tab: layout mode")
+    print("  Drag 3D: orbit   WASD: orbit  H: toggle UI  Enter: fullscreen  Esc: quit")
+    print(f"  Layers: {', '.join(f'{layer_keys[i]}={l.name}' for i, l in enumerate(layers))}")
 
     # Warmup: JIT-compile voxel_trace kernel before user interaction
     print("Compiling 3D kernel...", end="", flush=True)
@@ -117,14 +116,14 @@ def launch(subject_id, profile):
 
     while window.running:
         win_w, win_h = window.get_window_shape()
-        if win_w != display_size[0] or win_h != display_size[1]:
-            display.destroy()
-            display = ti.Vector.field(3, dtype=ti.f32, shape=(win_w, win_h))
-            display_size = [win_w, win_h]
-
         # Clamp render area to buffer size to prevent out-of-bounds writes
         rw = min(win_w, BUF_W)
         rh = min(win_h, BUF_H)
+
+        if rw != display_size[0] or rh != display_size[1]:
+            display.destroy()
+            display = ti.Vector.field(3, dtype=ti.f32, shape=(rw, rh))
+            display_size = [rw, rh]
 
         state.layout.update(rw, rh, state.layout_mode, state.fullscreen_panel)
 
@@ -186,13 +185,15 @@ def launch(subject_id, profile):
             draw_panel_border(buf, p.x0, p.y0, p.w, p.h,
                               *(0.6, 0.6, 0.2) if focused else (0.15, 0.15, 0.18))
 
-        # Render 3D panel
+        # Render 3D panel (voxel trace in 3D mode, crosshair widget in slice mode)
         p3 = state.layout.panels[3]
         if p3.w > 0 and p3.h > 0:
-            # Sync group opacity from state to GPU field
-            for gi in range(N_GROUPS):
-                group_opacity[gi] = state.group_opacity[gi]
-            _render_3d(state, data, buf, p3, cat_lut, group_opacity)
+            if state.layout_mode == LayoutMode.THREE_D:
+                for gi in range(N_GROUPS):
+                    group_opacity[gi] = state.group_opacity[gi]
+                _render_3d(state, data, buf, p3, cat_lut, group_opacity)
+            else:
+                _render_crosshair_widget(state, buf, p3)
             focused = (3 == state.focused_panel)
             draw_panel_border(buf, p3.x0, p3.y0, p3.w, p3.h,
                               *(0.6, 0.6, 0.2) if focused else (0.15, 0.15, 0.18))
@@ -250,6 +251,39 @@ def _render_3d(state, data, buf, panel, cat_lut, group_opacity):
         up[0], up[1], up[2],
         fov_scale, state.N,
     )
+
+
+def _render_crosshair_widget(state, buf, panel):
+    cam = widget_camera(state)
+    basis = cam.basis()
+    if basis is None:
+        return
+    fwd, right, up = basis
+    eye = cam.eye_position()
+    fov_scale = math.tan(math.radians(cam.fov_deg) / 2.0)
+
+    crosshair_3d(
+        buf,
+        panel.x0, panel.y0, panel.w, panel.h,
+        eye[0], eye[1], eye[2],
+        fwd[0], fwd[1], fwd[2],
+        right[0], right[1], right[2],
+        up[0], up[1], up[2],
+        fov_scale, state.N,
+        float(state.crosshair[0]), float(state.crosshair[1]),
+        float(state.crosshair[2]),
+    )
+
+
+def widget_camera(state):
+    """Camera for the 3D crosshair widget — centered on cube, framed to fit."""
+    cam = OrbitalCamera()
+    cam.azimuth = state.camera.azimuth
+    cam.elevation = state.camera.elevation
+    cam.fov_deg = state.camera.fov_deg
+    cam.center = (state.N / 2.0, state.N / 2.0, state.N / 2.0)
+    cam.distance = state.N * 2.0
+    return cam
 
 
 def _draw_gui(window, state, layers):

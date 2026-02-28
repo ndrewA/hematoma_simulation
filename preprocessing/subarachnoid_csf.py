@@ -15,7 +15,7 @@ import numpy as np
 from scipy.ndimage import distance_transform_edt, label as cc_label
 
 from preprocessing.profiling import step
-from preprocessing.utils import PROFILES, add_grid_args, processed_dir, resolve_grid_args
+from preprocessing.utils import add_grid_args, processed_dir, resolve_grid_args
 from preprocessing.material_map import CLASS_NAMES, print_census, save_material_map
 
 
@@ -64,9 +64,10 @@ def load_inputs(out_dir):
         meta = json.load(f)
     dx_mm = float(meta["dx_mm"])
 
-    assert mat.shape == sdf.shape == brain.shape, (
-        f"Shape mismatch: mat={mat.shape}, sdf={sdf.shape}, brain={brain.shape}"
-    )
+    if not (mat.shape == sdf.shape == brain.shape):
+        raise ValueError(
+            f"Shape mismatch: mat={mat.shape}, sdf={sdf.shape}, brain={brain.shape}"
+        )
 
     return mat, sdf, brain, affine, dx_mm
 

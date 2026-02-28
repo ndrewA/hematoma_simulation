@@ -37,6 +37,8 @@ class TestBuildGridAffine:
         # Voxel 0 should map to -128mm, voxel 255 to +127mm
         origin_phys = A @ np.array([0, 0, 0, 1.0])
         np.testing.assert_allclose(origin_phys[:3], -128.0)
+        far_phys = A @ np.array([255, 255, 255, 1.0])
+        np.testing.assert_allclose(far_phys[:3], 127.0)
 
 
 # ---------------------------------------------------------------------------

@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 import edt as _edt
 import nibabel as nib
 import numpy as np
-from scipy.interpolate import PchipInterpolator, interp1d
+from scipy.interpolate import PchipInterpolator, make_interp_spline
 from scipy.ndimage import (
     binary_dilation,
     binary_erosion,
@@ -28,7 +28,6 @@ from skimage.draw import line as draw_line, polygon as draw_polygon
 from preprocessing.profiling import step
 from preprocessing.utils import (
     FS_LUT_SIZE,
-    PROFILES,
     add_grid_args,
     processed_dir,
     raw_dir,
@@ -352,9 +351,8 @@ def load_inputs(out_dir):
         meta = json.load(f)
     dx_mm = float(meta["dx_mm"])
 
-    assert mat.shape == fs.shape, (
-        f"Shape mismatch: mat={mat.shape}, fs={fs.shape}"
-    )
+    if mat.shape != fs.shape:
+        raise ValueError(f"Shape mismatch: mat={mat.shape}, fs={fs.shape}")
 
     return mat, fs, skull_sdf, affine, dx_mm
 
@@ -595,7 +593,10 @@ def reconstruct_falx(mat, fs, skull_sdf, dx_mm, crop_slices,
 
     v_skull = skull_start - skull_end
     v_free = free_start - free_end
-    sim_scale = np.linalg.norm(v_free) / np.linalg.norm(v_skull)
+    skull_len = np.linalg.norm(v_skull)
+    if skull_len < 1e-8:
+        return  # degenerate: genu and crista at same location
+    sim_scale = np.linalg.norm(v_free) / skull_len
     angle_skull = np.arctan2(v_skull[1], v_skull[0])
     angle_free = np.arctan2(v_free[1], v_free[0])
     dtheta = angle_free - angle_skull
@@ -614,9 +615,11 @@ def reconstruct_falx(mat, fs, skull_sdf, dx_mm, crop_slices,
     for i in range(1, len(tx_y)):
         skull_arc[i] = skull_arc[i - 1] + np.hypot(
             tx_y[i] - tx_y[i - 1], tx_z[i] - tx_z[i - 1])
+    if skull_arc[-1] < 1e-8:
+        return  # degenerate: zero arc length
     skull_t = skull_arc / skull_arc[-1]
-    skull_y_of_t = interp1d(skull_t, tx_y, kind="linear")
-    skull_z_of_t = interp1d(skull_t, tx_z, kind="linear")
+    skull_y_of_t = make_interp_spline(skull_t, tx_y, k=1)
+    skull_z_of_t = make_interp_spline(skull_t, tx_z, k=1)
 
     eps = 1e-4
     T0_y = float(skull_y_of_t(eps) - skull_y_of_t(0)) / eps
@@ -1034,7 +1037,7 @@ def check_medial_wall_proximity(falx_mask, subject, dx_mm, affine):
 
     # Convert falx voxel indices to physical mm (once for both hemispheres)
     falx_ijk = np.argwhere(falx_mask).astype(np.float64)
-    falx_mm = falx_ijk * dx_mm + affine[:3, 3]
+    falx_mm = (affine[:3, :3] @ falx_ijk.T).T + affine[:3, 3]
 
     results = []
     for hemi, label in [("L", "left"), ("R", "right")]:

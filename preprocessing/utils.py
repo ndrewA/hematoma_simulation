@@ -138,14 +138,16 @@ def resample_to_grid(source, grid_affine, grid_shape, order=0, cval=0.0,
 def build_ball(radius_vox):
     """Build a spherical boolean structuring element.
 
-    Returns an array of shape (2*radius_vox+1,) per axis, True where
-    Euclidean distance from center <= radius_vox.
+    Returns an array of shape (2*r+1,) per axis, True where
+    Euclidean distance from center <= radius_vox.  The half-width r
+    is ceil(radius_vox) so that fractional radii are not silently
+    truncated (e.g. 1.5 produces a diameter-5 kernel, not diameter-3).
     """
-    r = int(radius_vox)
+    r = int(np.ceil(radius_vox))
     diameter = 2 * r + 1
     ax = np.arange(diameter) - r
     x, y, z = np.meshgrid(ax, ax, ax, indexing='ij')
-    return (x * x + y * y + z * z) <= r * r
+    return (x * x + y * y + z * z) <= radius_vox * radius_vox
 
 
 # ---------------------------------------------------------------------------

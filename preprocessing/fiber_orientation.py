@@ -16,9 +16,7 @@ import nibabel as nib
 import numpy as np
 
 from preprocessing.profiling import step
-from preprocessing.utils import FS_LUT_SIZE
-
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+from preprocessing.utils import FS_LUT_SIZE, raw_dir, processed_dir
 
 # ---------------------------------------------------------------------------
 # Anisotropic (white-matter-like) FreeSurfer labels  (Section 4.4)
@@ -279,11 +277,13 @@ def print_brain_coverage(M0, brain_mask, is_aniso):
     n_wm = int(np.count_nonzero(is_aniso))
     n_wm_m0 = int(np.count_nonzero(has_m0 & is_aniso))
     n_nonwm_m0 = int(np.count_nonzero(has_m0 & brain_mask & ~is_aniso))
-    print(f"  Brain voxels with M0: {n_brain_m0}/{n_brain} "
-          f"({100*n_brain_m0/n_brain:.1f}%)")
-    print(f"    WM:     {n_wm_m0}/{n_wm} ({100*n_wm_m0/n_wm:.1f}%)")
-    print(f"    Non-WM: {n_nonwm_m0}/{n_brain - n_wm} "
-          f"({100*n_nonwm_m0/(n_brain - n_wm):.1f}%)")
+    brain_pct = 100 * n_brain_m0 / n_brain if n_brain > 0 else 0.0
+    wm_pct = 100 * n_wm_m0 / n_wm if n_wm > 0 else 0.0
+    n_nonwm = n_brain - n_wm
+    nonwm_pct = 100 * n_nonwm_m0 / n_nonwm if n_nonwm > 0 else 0.0
+    print(f"  Brain voxels with M0: {n_brain_m0}/{n_brain} ({brain_pct:.1f}%)")
+    print(f"    WM:     {n_wm_m0}/{n_wm} ({wm_pct:.1f}%)")
+    print(f"    Non-WM: {n_nonwm_m0}/{n_nonwm} ({nonwm_pct:.1f}%)")
 
 
 def print_coverage(fracs, brain_mask):
@@ -387,9 +387,9 @@ def main(argv=None):
     print()
 
     # Paths
-    t1w_dir = _PROJECT_ROOT / "data" / "raw" / subject / "T1w"
+    t1w_dir = raw_dir(subject)
     bedpostx_dir = t1w_dir / "Diffusion.bedpostX"
-    out_dir = _PROJECT_ROOT / "data" / "processed" / subject
+    out_dir = processed_dir(subject, "")
 
     # 1. Load bedpostX
     with step("load bedpostX"):

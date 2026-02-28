@@ -1,7 +1,7 @@
 """Diagnostic figure generation for validation.
 
-Figures 1-4 visualize material maps, dural membranes, skull SDF,
-and fiber orientation (DEC) maps.
+Figures 1-6 visualize material maps, dural membranes, skull SDF,
+fiber orientation (DEC) maps, SimNIBS comparison, and surface distances.
 """
 
 import numpy as np
@@ -389,11 +389,13 @@ def generate_fig4(fiber_data, subject, profile, path):
     """Direction-Encoded Color map at native fiber resolution: 2x2 + legend."""
     shape = fiber_data.shape[:3]
 
+    # Slice positions as fractions of shape, adapts to any resolution
+    sz, sy, sx = shape[2], shape[1], shape[0]
     slices_info = [
-        ("Axial z=72 (CC level)", 2, 72),
-        ("Coronal y=100", 1, 100),
-        ("Sagittal x=72", 0, 72),
-        ("Axial z=82 (corona radiata)", 2, 82),
+        ("Axial (CC level)", 2, int(sz * 0.50)),
+        ("Coronal (mid)", 1, int(sy * 0.57)),
+        ("Sagittal (mid)", 0, int(sx * 0.50)),
+        ("Axial (corona radiata)", 2, int(sz * 0.57)),
     ]
 
     fig, axes = plt.subplots(2, 3, figsize=(16, 10),

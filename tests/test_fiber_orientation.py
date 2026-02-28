@@ -1,7 +1,6 @@
 """Tests for preprocessing/fiber_orientation.py — structure tensor, WM mask."""
 
 import numpy as np
-import pytest
 
 from preprocessing.fiber_orientation import (
     _build_aniso_lut,

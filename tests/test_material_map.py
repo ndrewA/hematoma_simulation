@@ -82,11 +82,13 @@ class TestBuildLut:
     def test_unmapped_slots_get_sentinel(self):
         lut, _ = build_lut()
         all_mapped = set(DIRECT_MAP.keys()) | set(FALLBACK_MAP.keys())
-        # Find a slot that is unmapped
         for i in range(FS_LUT_SIZE):
             if i not in all_mapped:
                 assert lut[i] == _SENTINEL, f"Slot {i} should be sentinel"
-                break
+
+    def test_no_overlap_direct_fallback(self):
+        overlap = set(DIRECT_MAP.keys()) & set(FALLBACK_MAP.keys())
+        assert overlap == set(), f"DIRECT_MAP and FALLBACK_MAP overlap on keys: {overlap}"
 
 
 # ---------------------------------------------------------------------------

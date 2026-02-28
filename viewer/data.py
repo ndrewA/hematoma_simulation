@@ -9,7 +9,9 @@ import taichi as ti
 
 # Reuse path helpers from preprocessing
 import sys
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+_project_root = str(Path(__file__).resolve().parent.parent)
+if _project_root not in sys.path:
+    sys.path.append(_project_root)
 from preprocessing.utils import (
     PROFILES, processed_dir, raw_dir, build_grid_affine, resample_to_grid,
 )
@@ -80,7 +82,8 @@ class ViewerData:
         # data was generated with older settings)
         sample = nib.load(str(pdir / "material_map.nii.gz"))
         self.grid_shape = sample.shape
-        self.N = self.grid_shape[0]
+        # Use max dimension for cubic assumption (viewer assumes cubic N)
+        self.N = max(self.grid_shape)
         self.dx = dx
         self.grid_affine = grid_affine
 

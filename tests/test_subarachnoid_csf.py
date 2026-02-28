@@ -44,7 +44,8 @@ class TestFillSubarachnoidCsf:
         n_sulcal, n_shell, sulcal, shell = fill_subarachnoid_csf(mat, sdf, brain)
 
         # Shell = inside skull & outside brain & vacuum
-        assert n_shell > 0
+        # Shell = 6^3 skull interior minus 2^3 brain = 208
+        assert n_shell == 208
         assert n_sulcal == 0  # brain voxels already labeled
 
     def test_does_not_overwrite_tissue(self):
@@ -69,6 +70,7 @@ class TestFillSubarachnoidCsf:
         mat_id = id(mat)
         fill_subarachnoid_csf(mat, sdf, brain)
         assert id(mat) == mat_id  # same object
+        assert np.any(mat == 8)   # data was actually modified
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +114,9 @@ class TestRecoverFringeTissue:
 
         n_recovered = recover_fringe_tissue(mat, brain, dx_mm=1.0, max_dist_mm=2.0)
         assert n_recovered > 0
+        # Recovered voxels should be assigned cortical GM (class 2)
+        fringe = (brain == 1) & (mat == 2)
+        assert np.count_nonzero(fringe) >= n_recovered
 
     def test_no_recovery_when_all_labeled(self):
         mat = np.ones((10, 10, 10), dtype=np.uint8) * 2
