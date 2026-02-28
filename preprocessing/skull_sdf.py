@@ -42,6 +42,7 @@ from preprocessing.utils import (
     raw_dir,
     resample_to_grid,
     resolve_grid_args,
+    section,
 )
 
 
@@ -406,9 +407,7 @@ def print_validation(sdf_sim, args, grid_affine, out_dir,
     N, dx = args.N, args.dx
     failed = False
 
-    print("\n" + "=" * 60)
-    print("Validation")
-    print("=" * 60)
+    section("Validation")
 
     # 1. Intracranial volume
     n_negative = int(np.count_nonzero(sdf_sim < 0))

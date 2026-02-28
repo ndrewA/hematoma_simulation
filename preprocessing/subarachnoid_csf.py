@@ -14,7 +14,7 @@ import numpy as np
 from scipy.ndimage import distance_transform_edt, label as cc_label
 
 from preprocessing.profiling import step
-from preprocessing.utils import add_grid_args, processed_dir, resolve_grid_args
+from preprocessing.utils import add_grid_args, processed_dir, resolve_grid_args, section
 from preprocessing.material_map import CLASS_NAMES, print_census, save_material_map
 
 
@@ -174,9 +174,7 @@ def check_domain_closure(mat, sdf):
     vacuum_inside = (sdf < 0) & (mat == 0)
     n_violation = int(np.count_nonzero(vacuum_inside))
 
-    print("\n" + "=" * 60)
-    print("Domain Closure Check")
-    print("=" * 60)
+    section("Domain Closure Check")
 
     if n_violation > 0:
         raise ValueError(
@@ -191,9 +189,7 @@ def print_population_volumes(n_sulcal, n_shell, dx_mm, mat):
     voxel_vol_ml = dx_mm ** 3 / 1000.0
     total_u8_8 = int(np.count_nonzero(mat == 8))
 
-    print("\n" + "=" * 60)
-    print("Subarachnoid CSF Volumes")
-    print("=" * 60)
+    section("Subarachnoid CSF Volumes")
     print(f"  Sulcal CSF (new):  {n_sulcal:>10d} voxels  "
           f"{n_sulcal * voxel_vol_ml:>8.1f} mL")
     print(f"  Shell CSF  (new):  {n_shell:>10d} voxels  "
@@ -210,9 +206,7 @@ def print_sulcal_topology(sulcal, n_sulcal):
         print("\nSulcal topology: skipped (0 voxels)")
         return
 
-    print("\n" + "=" * 60)
-    print("Sulcal CSF Topology")
-    print("=" * 60)
+    section("Sulcal CSF Topology")
 
     labeled, n_components = cc_label(sulcal)
     if n_components > 0:
@@ -230,9 +224,7 @@ def print_shell_topology(shell, n_shell):
         print("\nShell topology: skipped (0 voxels)")
         return
 
-    print("\n" + "=" * 60)
-    print("Shell CSF Topology")
-    print("=" * 60)
+    section("Shell CSF Topology")
 
     labeled, n_components = cc_label(shell)
     if n_components > 0:

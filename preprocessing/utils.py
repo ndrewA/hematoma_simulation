@@ -169,3 +169,10 @@ def processed_dir(subject_id, profile):
 def validation_dir(subject_id):
     """Return absolute path to validation ground-truth data for a subject."""
     return _PROJECT_ROOT / "data" / "validation" / subject_id
+
+
+def section(title):
+    """Print a validation/report section banner."""
+    print("\n" + "=" * 60)
+    print(title)
+    print("=" * 60)

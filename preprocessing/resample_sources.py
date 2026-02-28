@@ -22,6 +22,7 @@ from preprocessing.utils import (
     raw_dir,
     resample_to_grid,
     resolve_grid_args,
+    section,
 )
 
 
@@ -153,9 +154,7 @@ def print_validation(source_unique_labels, n_source_mask_voxels,
     N, dx = args.N, args.dx
     source_voxel_mm = float(abs(source_affine[1, 1]))
 
-    print("\n" + "=" * 60)
-    print("Validation")
-    print("=" * 60)
+    section("Validation")
 
     # 1. Volume conservation (mask vs mask)
     n_resampled = int(np.count_nonzero(mask_resampled > 0))

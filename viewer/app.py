@@ -101,7 +101,7 @@ def launch(subject_id, profile):
     # Warmup: JIT-compile voxel_trace kernel before user interaction
     print("Compiling 3D kernel...", end="", flush=True)
     voxel_trace(
-        data.material_map, data.skull_sdf,
+        data.material_map, data.skull_sdf, data.exterior_dist,
         cat_lut, group_opacity, buf,
         0, 0, 1, 1,  # 1x1 pixel
         0.0, 0.0, float(N) * 2.0,  # eye far away
@@ -164,15 +164,14 @@ def _draw_panel_crosshair(state, panel_idx, buf):
     p = state.layout.panels[panel_idx]
     axis = state.PANEL_AXIS[panel_idx]
     N = state.N
-    zoom = state.panel_zoom[panel_idx]
-    pan_x, pan_y = state.panel_pan[panel_idx]
+    pv = state.panel_views[panel_idx]
 
     ui, vi = state.AXIS_UV[axis]
     cu_vox, cv_vox = state.crosshair[ui], state.crosshair[vi]
 
-    scale = min(p.w / N, p.h / N) * zoom
-    cx = int((cu_vox - N / 2.0 + pan_x) * scale + p.w / 2.0)
-    cy = int((cv_vox - N / 2.0 + pan_y) * scale + p.h / 2.0)
+    scale = min(p.w / N, p.h / N) * pv.zoom
+    cx = int((cu_vox - N / 2.0 + pv.pan_x) * scale + p.w / 2.0)
+    cy = int((cv_vox - N / 2.0 + pv.pan_y) * scale + p.h / 2.0)
 
     if 0 <= cx < p.w and 0 <= cy < p.h:
         draw_crosshair(buf, p.x0, p.y0, p.w, p.h, cx, cy)
@@ -219,13 +218,12 @@ def _render_slice_panels(state, layers, luts, g2f_matrix, buf, N):
 
         axis = state.PANEL_AXIS[panel_idx]
         si = state.slice_index(panel_idx)
-        zoom = state.panel_zoom[panel_idx]
-        pan_x, pan_y = state.panel_pan[panel_idx]
+        pv = state.panel_views[panel_idx]
 
         for layer in layers:
             if layer.visible:
                 _render_layer(layer, luts, g2f_matrix, buf,
-                              axis, si, p, zoom, pan_x, pan_y, N)
+                              axis, si, p, pv.zoom, pv.pan_x, pv.pan_y, N)
 
         _draw_panel_crosshair(state, panel_idx, buf)
         focused = (panel_idx == state.focused_panel)
@@ -243,7 +241,7 @@ def _render_3d(state, data, buf, panel, cat_lut, group_opacity):
     fov_scale = math.tan(math.radians(cam.fov_deg) / 2.0)
 
     voxel_trace(
-        data.material_map, data.skull_sdf,
+        data.material_map, data.skull_sdf, data.exterior_dist,
         cat_lut, group_opacity,
         buf,
         panel.x0, panel.y0, panel.w, panel.h,

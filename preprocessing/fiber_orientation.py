@@ -16,7 +16,7 @@ import nibabel as nib
 import numpy as np
 
 from preprocessing.profiling import step
-from preprocessing.utils import FS_LUT_SIZE, raw_dir, processed_dir
+from preprocessing.utils import FS_LUT_SIZE, raw_dir, processed_dir, section
 
 # ---------------------------------------------------------------------------
 # Anisotropic (white-matter-like) FreeSurfer labels  (Section 4.4)
@@ -212,9 +212,7 @@ def save_fiber_m0(out_dir, M0, diff_affine):
 # ---------------------------------------------------------------------------
 def print_trace_stats(M0, is_aniso, brain_mask):
     """Trace stats in brain and WM voxels."""
-    print("\n" + "=" * 60)
-    print("Trace Statistics")
-    print("=" * 60)
+    section("Trace Statistics")
     trace = M0[..., 0] + M0[..., 1] + M0[..., 2]
 
     for label, mask in [("Brain", brain_mask), ("WM", is_aniso)]:
@@ -234,9 +232,7 @@ def print_trace_stats(M0, is_aniso, brain_mask):
 
 def print_psd_check(M0, brain_mask, n_samples=10000):
     """Check positive semi-definiteness of M0 at random brain voxels."""
-    print("\n" + "=" * 60)
-    print("PSD Check (random brain voxels)")
-    print("=" * 60)
+    section("PSD Check (random brain voxels)")
 
     trace = M0[..., 0] + M0[..., 1] + M0[..., 2]
     nz_indices = np.argwhere(brain_mask & (trace > 0))
@@ -268,9 +264,7 @@ def print_psd_check(M0, brain_mask, n_samples=10000):
 
 def print_brain_coverage(M0, brain_mask, is_aniso):
     """Report M0 coverage in brain and WM regions."""
-    print("\n" + "=" * 60)
-    print("M0 Coverage")
-    print("=" * 60)
+    section("M0 Coverage")
     has_m0 = np.any(M0 != 0, axis=-1)
     n_brain = int(np.count_nonzero(brain_mask))
     n_brain_m0 = int(np.count_nonzero(has_m0 & brain_mask))
@@ -288,9 +282,7 @@ def print_brain_coverage(M0, brain_mask, is_aniso):
 
 def print_coverage(fracs, brain_mask):
     """Report fraction coverage (% of brain voxels with f_n > 0)."""
-    print("\n" + "=" * 60)
-    print("Fraction Coverage")
-    print("=" * 60)
+    section("Fraction Coverage")
     n_brain = int(np.count_nonzero(brain_mask))
     for n, f in enumerate(fracs):
         n_active = int(np.count_nonzero((f > 0) & brain_mask))
@@ -306,9 +298,7 @@ def print_principal_directions(M0, diff_labels):
 
     Uses FS labels mapped to diffusion space to identify CC voxels.
     """
-    print("\n" + "=" * 60)
-    print("Principal Directions (CC region)")
-    print("=" * 60)
+    section("Principal Directions (CC region)")
 
     # Build CC mask from FS labels in diffusion space
     cc_mask = np.zeros(diff_labels.shape, dtype=bool)
@@ -337,9 +327,7 @@ def print_principal_directions(M0, diff_labels):
 
 def print_smoothness(M0, brain_mask):
     """Mean gradient magnitude of trace in brain — expect < 0.5."""
-    print("\n" + "=" * 60)
-    print("Smoothness Check (brain voxels)")
-    print("=" * 60)
+    section("Smoothness Check (brain voxels)")
 
     trace = M0[..., 0] + M0[..., 1] + M0[..., 2]
 
@@ -443,9 +431,7 @@ def main(argv=None):
     print_principal_directions(M0, diff_labels)
     print_smoothness(M0, brain_mask)
 
-    print("\n" + "=" * 60)
-    print("Done.")
-    print("=" * 60)
+    section("Done.")
 
 
 if __name__ == "__main__":

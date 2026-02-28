@@ -16,6 +16,7 @@ from preprocessing.utils import (
     add_grid_args,
     processed_dir,
     resolve_grid_args,
+    section,
 )
 
 
@@ -256,9 +257,7 @@ def print_census(material, dx):
     """Print voxel count and volume per material class."""
     voxel_vol_ml = dx ** 3 / 1000.0
 
-    print("\n" + "=" * 60)
-    print("Material Census")
-    print("=" * 60)
+    section("Material Census")
     print(f"{'u8':>3s}  {'Class':<28s}  {'Voxels':>10s}  {'Volume (mL)':>11s}")
     print("-" * 60)
 
@@ -285,9 +284,7 @@ def print_census(material, dx):
 
 def print_validation(material):
     """Run per-step validation checks M1–M3."""
-    print("\n" + "=" * 60)
-    print("Validation")
-    print("=" * 60)
+    section("Validation")
 
     unique_vals = set(int(v) for v in np.unique(material))
 

@@ -33,6 +33,7 @@ from preprocessing.utils import (
     processed_dir,
     raw_dir,
     resolve_grid_args,
+    section,
 )
 from preprocessing.material_map import CLASS_NAMES, print_census, save_material_map
 
@@ -1041,9 +1042,7 @@ def check_idempotency(mat, fs):
 
 def print_membrane_continuity(falx_mask, tent_mask, dx_mm):
     """Report connected component analysis for each membrane."""
-    print("\n" + "=" * 60)
-    print("Membrane Continuity")
-    print("=" * 60)
+    section("Membrane Continuity")
 
     for name, mask in [("Falx", falx_mask), ("Tentorium", tent_mask)]:
         n = int(np.count_nonzero(mask))
@@ -1072,9 +1071,7 @@ def print_csf_components(mat, dx_mm):
         print("\nCSF components: skipped (0 voxels)")
         return
 
-    print("\n" + "=" * 60)
-    print("Remaining CSF Components")
-    print("=" * 60)
+    section("Remaining CSF Components")
 
     labeled, n_components = cc_label(csf_mask)
     del csf_mask
@@ -1094,9 +1091,7 @@ def print_volumes(n_falx, n_tent, n_overlap, n_total, dx_mm):
     """Report dural membrane volumes."""
     voxel_vol_ml = dx_mm ** 3 / 1000.0
 
-    print("\n" + "=" * 60)
-    print("Dural Membrane Volumes")
-    print("=" * 60)
+    section("Dural Membrane Volumes")
     print(f"  Falx cerebri:        {n_falx:>10d} voxels  "
           f"{n_falx * voxel_vol_ml:>8.1f} mL")
     print(f"  Tentorium cerebelli: {n_tent:>10d} voxels  "
@@ -1109,9 +1104,7 @@ def print_volumes(n_falx, n_tent, n_overlap, n_total, dx_mm):
 
 def print_thickness_estimate(falx_mask, tent_mask, dx_mm):
     """Estimate membrane thickness via erosion."""
-    print("\n" + "=" * 60)
-    print("Thickness Estimate")
-    print("=" * 60)
+    section("Thickness Estimate")
 
     for name, mask in [("Falx", falx_mask), ("Tentorium", tent_mask)]:
         n = int(np.count_nonzero(mask))
@@ -1166,9 +1159,7 @@ def check_medial_wall_proximity(falx_mask, subject, dx_mm, affine):
         results.append((label, float(np.median(dists)), float(np.percentile(dists, 95))))
 
     if results:
-        print("\n" + "=" * 60)
-        print("Medial Wall Proximity")
-        print("=" * 60)
+        section("Medial Wall Proximity")
         for label, median_d, p95_d in results:
             print(f"  {label} pial surface: median={median_d:.1f} mm, "
                   f"95th={p95_d:.1f} mm")
@@ -1179,9 +1170,7 @@ def print_junction_thickness(falx_mask, tent_mask, dx_mm, mat):
     overlap = falx_mask & tent_mask
     n_overlap = int(np.count_nonzero(overlap))
 
-    print("\n" + "=" * 60)
-    print("Falx-Tentorium Junction")
-    print("=" * 60)
+    section("Falx-Tentorium Junction")
 
     if n_overlap == 0:
         print("  No overlap between falx and tentorium")

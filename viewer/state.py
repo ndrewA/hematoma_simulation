@@ -13,6 +13,14 @@ class PanelRect:
     h: int
 
 
+@dataclass
+class PanelView:
+    """Per-panel view state (zoom + pan)."""
+    zoom: float = 1.0
+    pan_x: float = 0.0
+    pan_y: float = 0.0
+
+
 class DragType(IntEnum):
     NONE = 0
     ORBIT = 1
@@ -152,8 +160,7 @@ class ViewState:
         self.crosshair = [N // 2, N // 2, N // 2]
         self.fullscreen_panel = -1
         self.layout_mode = LayoutMode.SLICES
-        self.panel_zoom = [1.0, 1.0, 1.0, 1.0]
-        self.panel_pan = [(0.0, 0.0)] * 4
+        self.panel_views = [PanelView() for _ in range(4)]
         self.camera = OrbitalCamera()
         self.camera.distance = N * 1.0
         self.camera.center = (N / 2.0, N / 2.0, N / 2.0)

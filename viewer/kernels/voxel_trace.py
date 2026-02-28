@@ -92,6 +92,7 @@ def _detect_skull_surface(skull_sdf: ti.template(), ix: int, iy: int, iz: int,
 def voxel_trace(
     material_map: ti.template(),
     skull_sdf: ti.template(),
+    exterior_dist: ti.template(),
     cat_lut: ti.template(),
     group_opacity: ti.template(),
     buf: ti.template(),
@@ -122,8 +123,19 @@ def voxel_trace(
 
         color = bg
         if t_near < t_far:
-            # Entry point (small offset to land inside AABB)
-            p = eye + rd * (t_near + 0.001)
+            # Sphere march through vacuum using exact distance field
+            t_cur = t_near + 0.001
+            for _sm in range(64):
+                sp = eye + rd * t_cur
+                sx = ti.max(0, ti.min(int(ti.floor(sp.x)), N_i - 1))
+                sy = ti.max(0, ti.min(int(ti.floor(sp.y)), N_i - 1))
+                sz = ti.max(0, ti.min(int(ti.floor(sp.z)), N_i - 1))
+                d = exterior_dist[sx, sy, sz]
+                if d <= 1.0 or t_cur >= t_far:
+                    break
+                t_cur += d - 1.0  # land at d >= 1: among skull surface voxels
+
+            p = eye + rd * t_cur
 
             # Starting voxel
             ix = ti.max(0, ti.min(int(ti.floor(p.x)), N_i - 1))

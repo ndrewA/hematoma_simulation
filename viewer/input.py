@@ -56,12 +56,12 @@ def _apply_drag(state, mouse, win_w, win_h):
         panel = drag.panel
         p = state.layout.panels[panel]
         N = state.N
-        zoom = state.panel_zoom[panel]
-        scale = min(p.w / N, p.h / N) * zoom
+        pv = state.panel_views[panel]
+        scale = min(p.w / N, p.h / N) * pv.zoom
         dx_px = (mouse[0] - prev[0]) * win_w
         dy_px = (mouse[1] - prev[1]) * win_h
-        pan_x, pan_y = state.panel_pan[panel]
-        state.panel_pan[panel] = (pan_x + dx_px / scale, pan_y + dy_px / scale)
+        pv.pan_x += dx_px / scale
+        pv.pan_y += dy_px / scale
 
     elif drag.type == DragType.PLANE_DRAG:
         _apply_plane_drag(state, mouse, prev, state.widget_camera(), win_w, win_h)
@@ -161,13 +161,15 @@ def _keys_slice(state, fp, key_presses):
         state.set_slice_index(fp, state.slice_index(fp) + 1)
     if ti.ui.DOWN in key_presses:
         state.set_slice_index(fp, state.slice_index(fp) - 1)
+    pv = state.panel_views[fp]
     if 'e' in key_presses:
-        state.panel_zoom[fp] = min(state.panel_zoom[fp] * 1.2, 20.0)
+        pv.zoom = min(pv.zoom * 1.2, 20.0)
     if 'q' in key_presses:
-        state.panel_zoom[fp] = max(state.panel_zoom[fp] / 1.2, 0.1)
+        pv.zoom = max(pv.zoom / 1.2, 0.1)
     if 'r' in key_presses:
-        state.panel_pan[fp] = (0.0, 0.0)
-        state.panel_zoom[fp] = 1.0
+        pv.pan_x = 0.0
+        pv.pan_y = 0.0
+        pv.zoom = 1.0
 
 
 # --- Crosshair and plane helpers ---
@@ -181,14 +183,13 @@ def _set_crosshair_from_click(state, panel, mx, my):
     N = state.N
     dim_u, dim_v = N, N
 
-    zoom = state.panel_zoom[panel]
-    pan_x, pan_y = state.panel_pan[panel]
-    scale = min(p.w / dim_u, p.h / dim_v) * zoom
+    pv = state.panel_views[panel]
+    scale = min(p.w / dim_u, p.h / dim_v) * pv.zoom
 
     lx = mx - p.x0
     ly = my - p.y0
-    u = (lx - p.w / 2.0) / scale + dim_u / 2.0 - pan_x
-    v = (ly - p.h / 2.0) / scale + dim_v / 2.0 - pan_y
+    u = (lx - p.w / 2.0) / scale + dim_u / 2.0 - pv.pan_x
+    v = (ly - p.h / 2.0) / scale + dim_v / 2.0 - pv.pan_y
     ui = int(round(u))
     vi = int(round(v))
 

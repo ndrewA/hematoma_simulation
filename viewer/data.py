@@ -5,6 +5,7 @@ import json
 import nibabel as nib
 import numpy as np
 import taichi as ti
+from scipy.ndimage import binary_dilation, distance_transform_edt, generate_binary_structure
 
 from preprocessing.utils import (
     PROFILES, processed_dir, raw_dir, build_grid_affine, resample_to_grid,
@@ -99,6 +100,17 @@ class ViewerData:
         dura_np = (mat_np == 10).astype(np.uint8)
         self.dura_mask = ti.field(dtype=ti.u8, shape=self.grid_shape)
         self.dura_mask.from_numpy(dura_np)
+
+        # Distance from each exterior voxel to skull+shell boundary (voxel units)
+        # Dilate interior by 1 voxel so the inferred skull surface (SDF sign-
+        # change voxels) is included as an obstacle for sphere tracing.
+        sdf_np = self.skull_sdf.to_numpy()
+        interior = sdf_np < 0
+        struct6 = generate_binary_structure(3, 1)  # 6-connectivity
+        obstacle = binary_dilation(interior, structure=struct6)
+        exterior_dist = distance_transform_edt(~obstacle).astype(np.float32)
+        self.exterior_dist = ti.field(dtype=ti.f32, shape=self.grid_shape)
+        self.exterior_dist.from_numpy(exterior_dist)
 
         centroid = self.meta.get('brain_centroid_grid')
         if centroid:
