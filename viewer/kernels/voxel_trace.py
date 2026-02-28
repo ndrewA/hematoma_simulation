@@ -67,6 +67,27 @@ def shade_voxel(color: tm.vec3, n: tm.vec3, rd: tm.vec3) -> tm.vec3:
     return tm.clamp(color * lighting, 0.0, 1.0)
 
 
+@ti.func
+def _detect_skull_surface(skull_sdf: ti.template(), ix: int, iy: int, iz: int,
+                          N_i: int) -> bool:
+    """Check if voxel is on the skull surface via 6-neighbor sign change."""
+    s = skull_sdf[ix, iy, iz]
+    on_skull = False
+    if ix > 0 and s * skull_sdf[ix-1, iy, iz] < 0.0:
+        on_skull = True
+    if ix < N_i-1 and s * skull_sdf[ix+1, iy, iz] < 0.0:
+        on_skull = True
+    if iy > 0 and s * skull_sdf[ix, iy-1, iz] < 0.0:
+        on_skull = True
+    if iy < N_i-1 and s * skull_sdf[ix, iy+1, iz] < 0.0:
+        on_skull = True
+    if iz > 0 and s * skull_sdf[ix, iy, iz-1] < 0.0:
+        on_skull = True
+    if iz < N_i-1 and s * skull_sdf[ix, iy, iz+1] < 0.0:
+        on_skull = True
+    return on_skull
+
+
 @ti.kernel
 def voxel_trace(
     material_map: ti.template(),
@@ -158,23 +179,7 @@ def voxel_trace(
                 label = mat
                 group = label_to_group(label)
                 if group == GROUP_EMPTY:
-                    # Skull detection: zero-crossing of skull_sdf at this voxel
-                    # Check 6 face-neighbors for sign change (same as 2D contour)
-                    s = skull_sdf[ix, iy, iz]
-                    on_skull = False
-                    if ix > 0 and s * skull_sdf[ix-1, iy, iz] < 0.0:
-                        on_skull = True
-                    if ix < N_i-1 and s * skull_sdf[ix+1, iy, iz] < 0.0:
-                        on_skull = True
-                    if iy > 0 and s * skull_sdf[ix, iy-1, iz] < 0.0:
-                        on_skull = True
-                    if iy < N_i-1 and s * skull_sdf[ix, iy+1, iz] < 0.0:
-                        on_skull = True
-                    if iz > 0 and s * skull_sdf[ix, iy, iz-1] < 0.0:
-                        on_skull = True
-                    if iz < N_i-1 and s * skull_sdf[ix, iy, iz+1] < 0.0:
-                        on_skull = True
-                    if on_skull:
+                    if _detect_skull_surface(skull_sdf, ix, iy, iz, N_i):
                         label = 12
                         group = GROUP_SKULL
 

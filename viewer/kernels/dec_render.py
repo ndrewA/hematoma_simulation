@@ -3,6 +3,8 @@
 import taichi as ti
 import taichi.math as tm
 
+from viewer.kernels.common import pixel_to_voxel as _pixel_to_voxel, slice_to_grid as _slice_to_grid
+
 
 @ti.func
 def _power_iteration(M00: float, M11: float, M22: float,
@@ -56,30 +58,13 @@ def dec_slice(
     bh = buf.shape[1]
 
     for px, py in ti.ndrange(pw, ph):
-        scale = ti.min(float(pw) / float(dim_u), float(ph) / float(dim_v)) * zoom
-        u = (px - pw / 2.0) / scale + dim_u / 2.0 - pan_x
-        v = (py - ph / 2.0) / scale + dim_v / 2.0 - pan_y
-
+        u, v = _pixel_to_voxel(px, py, pw, ph, dim_u, dim_v, zoom, pan_x, pan_y)
         ui = int(ti.round(u))
         vi = int(ti.round(v))
 
         if 0 <= ui < dim_u and 0 <= vi < dim_v:
-            # Reconstruct 3D grid coordinate
-            gi = 0.0
-            gj = 0.0
-            gk = 0.0
-            if axis == 2:  # axial
-                gi = float(ui)
-                gj = float(vi)
-                gk = float(slice_idx)
-            elif axis == 1:  # coronal
-                gi = float(ui)
-                gj = float(slice_idx)
-                gk = float(vi)
-            else:  # sagittal
-                gi = float(slice_idx)
-                gj = float(ui)
-                gk = float(vi)
+            gi, gj, gk = _slice_to_grid(axis, float(ui), float(vi),
+                                         float(slice_idx))
 
             # Transform grid coord → fiber voxel coord
             fi = g2f_00 * gi + g2f_01 * gj + g2f_02 * gk + g2f_03

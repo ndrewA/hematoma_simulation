@@ -2,37 +2,17 @@
 
 import taichi as ti
 
-from viewer.kernels.common import get_slice_dims as _get_slice_dims
-
-
-@ti.func
-def _pixel_to_voxel(px: int, py: int, pw: int, ph: int,
-                    dim_u: int, dim_v: int, zoom: float,
-                    pan_x: float, pan_y: float):
-    """Map panel pixel to voxel (u, v) coordinates."""
-    scale = ti.min(float(pw) / float(dim_u), float(ph) / float(dim_v)) * zoom
-    u = (px - pw / 2.0) / scale + dim_u / 2.0 - pan_x
-    v = (py - ph / 2.0) / scale + dim_v / 2.0 - pan_y
-    return u, v
+from viewer.kernels.common import (
+    get_slice_dims as _get_slice_dims,
+    pixel_to_voxel as _pixel_to_voxel,
+    sample_f32 as _sample_f32,
+)
 
 
 @ti.func
 def _sample_u8(vol: ti.template(), axis: int, slice_idx: int, ui: int, vi: int):
     """Sample a u8 volume given axis, slice index, and in-plane coords."""
     val = ti.cast(0, ti.u8)
-    if axis == 2:
-        val = vol[ui, vi, slice_idx]
-    elif axis == 1:
-        val = vol[ui, slice_idx, vi]
-    else:
-        val = vol[slice_idx, ui, vi]
-    return val
-
-
-@ti.func
-def _sample_f32(vol: ti.template(), axis: int, slice_idx: int, ui: int, vi: int):
-    """Sample a f32 volume given axis, slice index, and in-plane coords."""
-    val = 0.0
     if axis == 2:
         val = vol[ui, vi, slice_idx]
     elif axis == 1:

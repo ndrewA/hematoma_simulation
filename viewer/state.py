@@ -20,6 +20,33 @@ class DragType(IntEnum):
     PLANE_DRAG = 3
 
 
+class DragState:
+    """Encapsulates drag interaction state."""
+
+    def __init__(self):
+        self.reset()
+
+    def start(self, drag_type, mouse, lmb=True, panel=-1, axis=-1, pos=0.0):
+        self.type = drag_type
+        self.prev = mouse
+        self.lmb = lmb
+        self.panel = panel
+        self.axis = axis
+        self.pos = pos
+
+    def reset(self):
+        self.type = DragType.NONE
+        self.prev = None
+        self.panel = -1
+        self.axis = -1
+        self.pos = 0.0
+        self.lmb = True
+
+    @property
+    def active(self):
+        return self.type != DragType.NONE
+
+
 class LayoutMode(IntEnum):
     SLICES = 0     # 3 slice panels
     THREE_D = 1    # 3D fullscreen
@@ -136,15 +163,11 @@ class ViewState:
         self.show_ui = True
         # 3D voxel renderer: per-group opacity [brain, csf, dura, skull, choroid, vessel]
         self.group_opacity = [1.0, 1.0, 1.0, 0.0, 1.0, 1.0]
-        # Drag state machine
-        self._drag_type = DragType.NONE
-        self._drag_prev = None       # previous mouse position (normalized coords)
-        self._drag_panel = -1        # panel that started the drag
-        self._drag_axis = -1         # grabbed axis (for PLANE_DRAG)
-        self._drag_pos = 0.0         # float accumulator (for PLANE_DRAG)
-        self._drag_lmb = True        # True = LMB started drag, False = RMB
+        self.drag = DragState()
 
     PANEL_AXIS = [2, 1, 0]  # panel 0=axial(k), 1=coronal(j), 2=sagittal(i)
+    # Maps axis → (crosshair_u_index, crosshair_v_index) for in-plane coords
+    AXIS_UV = {2: (0, 1), 1: (0, 2), 0: (1, 2)}
 
     def slice_index(self, panel):
         return self.crosshair[self.PANEL_AXIS[panel]]

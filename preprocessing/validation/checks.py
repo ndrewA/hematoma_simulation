@@ -558,6 +558,25 @@ def check_c3(ctx):
                value=f"{n_adjacent} adjacent CSF voxels at z={z_upper}")
 
 
+def _adjacent_labels(labeled, tissue_mask):
+    """Find connected-component labels in `labeled` that are 6-adjacent to `tissue_mask`."""
+    adj = set()
+    for ax in range(3):
+        for d in (-1, 1):
+            sl_src = [slice(None)] * 3
+            sl_dst = [slice(None)] * 3
+            if d == 1:
+                sl_src[ax] = slice(None, -1)
+                sl_dst[ax] = slice(1, None)
+            else:
+                sl_src[ax] = slice(1, None)
+                sl_dst[ax] = slice(None, -1)
+            labels_at_dst = labeled[tuple(sl_dst)]
+            mask = tissue_mask[tuple(sl_src)]
+            adj.update(labels_at_dst[mask & (labels_at_dst > 0)])
+    return adj
+
+
 @check("C4", severity="WARN", phase="dural", needs={"mat", "fs"})
 def check_c4(ctx):
     """Falx barrier separates left/right supratentorial CSF."""
@@ -586,24 +605,8 @@ def check_c4(ctx):
     labeled, n_comp = cc_label(csf_above_cc)
     del csf_above_cc
 
-    left_adj_labels = set()
-    right_adj_labels = set()
-    for ax in range(3):
-        for d in (-1, 1):
-            sl_src = [slice(None)] * 3
-            sl_dst = [slice(None)] * 3
-            if d == 1:
-                sl_src[ax] = slice(None, -1)
-                sl_dst[ax] = slice(1, None)
-            else:
-                sl_src[ax] = slice(1, None)
-                sl_dst[ax] = slice(None, -1)
-            labels_at_dst = labeled[tuple(sl_dst)]
-            lt = left_tissue[tuple(sl_src)]
-            left_adj_labels.update(labels_at_dst[lt & (labels_at_dst > 0)])
-            rt = right_tissue[tuple(sl_src)]
-            right_adj_labels.update(labels_at_dst[rt & (labels_at_dst > 0)])
-
+    left_adj_labels = _adjacent_labels(labeled, left_tissue)
+    right_adj_labels = _adjacent_labels(labeled, right_tissue)
     bridging_labels = left_adj_labels & right_adj_labels
     n_bridging = len(bridging_labels)
     del labeled, left_tissue, right_tissue

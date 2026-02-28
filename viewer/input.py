@@ -36,41 +36,24 @@ def _collect_events(window):
     return key_presses
 
 
-# --- Drag state machine ---
-
-def _start_drag(state, drag_type, mouse, lmb=True, panel=-1, axis=-1, pos=0.0):
-    state._drag_type = drag_type
-    state._drag_prev = mouse
-    state._drag_lmb = lmb
-    state._drag_panel = panel
-    state._drag_axis = axis
-    state._drag_pos = pos
-
-
-def _end_drag(state):
-    state._drag_type = DragType.NONE
-    state._drag_prev = None
-    state._drag_panel = -1
-    state._drag_axis = -1
-    state._drag_pos = 0.0
-    state._drag_lmb = True
-
+# --- Drag dispatch ---
 
 def _apply_drag(state, mouse, win_w, win_h):
-    prev = state._drag_prev
+    drag = state.drag
+    prev = drag.prev
     if prev is None:
-        state._drag_prev = mouse
+        drag.prev = mouse
         return
 
-    if state._drag_type == DragType.ORBIT:
+    if drag.type == DragType.ORBIT:
         dx = mouse[0] - prev[0]
         dy = mouse[1] - prev[1]
         state.camera.azimuth -= dx * 3.0
         state.camera.elevation -= dy * 3.0
         state.camera.elevation = max(-1.4, min(1.4, state.camera.elevation))
 
-    elif state._drag_type == DragType.SLICE_PAN:
-        panel = state._drag_panel
+    elif drag.type == DragType.SLICE_PAN:
+        panel = drag.panel
         p = state.layout.panels[panel]
         N = state.N
         zoom = state.panel_zoom[panel]
@@ -80,11 +63,11 @@ def _apply_drag(state, mouse, win_w, win_h):
         pan_x, pan_y = state.panel_pan[panel]
         state.panel_pan[panel] = (pan_x + dx_px / scale, pan_y + dy_px / scale)
 
-    elif state._drag_type == DragType.PLANE_DRAG:
+    elif drag.type == DragType.PLANE_DRAG:
         from viewer.app import widget_camera
         _apply_plane_drag(state, mouse, prev, widget_camera(state), win_w, win_h)
 
-    state._drag_prev = mouse
+    drag.prev = mouse
 
 
 # --- Mouse handling ---
@@ -94,12 +77,12 @@ def _handle_mouse(window, state, mouse, hovered, mx, my, win_w, win_h):
     rmb = window.is_pressed(ti.ui.RMB)
 
     # Active drag: continue or end
-    if state._drag_type != DragType.NONE:
-        btn_held = lmb if state._drag_lmb else rmb
+    if state.drag.active:
+        btn_held = lmb if state.drag.lmb else rmb
         if btn_held:
             _apply_drag(state, mouse, win_w, win_h)
         else:
-            _end_drag(state)
+            state.drag.reset()
         return
 
     # No active drag — check for new interactions
@@ -108,19 +91,19 @@ def _handle_mouse(window, state, mouse, hovered, mx, my, win_w, win_h):
             from viewer.app import widget_camera
             axis = _pick_plane(state, mx, my, widget_camera(state))
             if axis >= 0:
-                _start_drag(state, DragType.PLANE_DRAG, mouse, lmb=True,
-                            axis=axis, pos=float(state.crosshair[axis]))
+                state.drag.start(DragType.PLANE_DRAG, mouse, lmb=True,
+                                 axis=axis, pos=float(state.crosshair[axis]))
         elif hovered == 3:
-            _start_drag(state, DragType.ORBIT, mouse, lmb=True)
+            state.drag.start(DragType.ORBIT, mouse, lmb=True)
         elif 0 <= hovered <= 2:
             _set_crosshair_from_click(state, hovered, mx, my)
         return
 
     if rmb:
         if hovered == 3:
-            _start_drag(state, DragType.ORBIT, mouse, lmb=False)
+            state.drag.start(DragType.ORBIT, mouse, lmb=False)
         elif 0 <= hovered <= 2:
-            _start_drag(state, DragType.SLICE_PAN, mouse, lmb=False, panel=hovered)
+            state.drag.start(DragType.SLICE_PAN, mouse, lmb=False, panel=hovered)
 
 
 # --- Key handling ---
@@ -140,7 +123,9 @@ def _handle_keys(window, state, key_presses):
 
     # Slice navigation and zoom vs 3D camera
     fp = state.focused_panel
-    if fp == 3 or (state.layout_mode == LayoutMode.THREE_D and not (0 <= fp <= 2)):
+    in_3d_context = (fp == 3 or
+                     (state.layout_mode == LayoutMode.THREE_D and not (0 <= fp <= 2)))
+    if in_3d_context:
         _keys_3d(window, state, key_presses)
     elif 0 <= fp <= 2:
         _keys_slice(state, fp, key_presses)
@@ -210,15 +195,9 @@ def _set_crosshair_from_click(state, panel, mx, my):
     vi = int(round(v))
 
     if 0 <= ui < dim_u and 0 <= vi < dim_v:
-        if axis == 2:
-            state.crosshair[0] = ui
-            state.crosshair[1] = vi
-        elif axis == 1:
-            state.crosshair[0] = ui
-            state.crosshair[2] = vi
-        else:
-            state.crosshair[1] = ui
-            state.crosshair[2] = vi
+        cu, cv = state.AXIS_UV[axis]
+        state.crosshair[cu] = ui
+        state.crosshair[cv] = vi
 
 
 def _pick_plane(state, mx, my, cam):
@@ -266,7 +245,7 @@ def _pick_plane(state, mx, my, cam):
 
 def _apply_plane_drag(state, mouse, prev_mouse, cam, win_w, win_h):
     """Move the grabbed crosshair plane based on mouse delta."""
-    axis = state._drag_axis
+    axis = state.drag.axis
     basis = cam.basis()
     if basis is None:
         return
@@ -297,6 +276,6 @@ def _apply_plane_drag(state, mouse, prev_mouse, cam, win_w, win_h):
     voxels_per_pixel = (cam.distance * fov_scale) / half_h
     delta = proj_px * voxels_per_pixel
 
-    state._drag_pos += delta
-    clamped = max(0, min(state.N - 1, int(round(state._drag_pos))))
+    state.drag.pos += delta
+    clamped = max(0, min(state.N - 1, int(round(state.drag.pos))))
     state.crosshair[axis] = clamped

@@ -30,6 +30,15 @@ _MAT_CMAP = ListedColormap(MATERIAL_COLORS)
 _MAT_NORM = BoundaryNorm(np.arange(-0.5, 12.5, 1.0), _MAT_CMAP.N)
 
 
+def _try_figure(num, func, *args):
+    """Run a figure generator with standardized logging and error handling."""
+    print(f"  Generating Figure {num}...")
+    try:
+        func(*args)
+    except Exception as e:
+        print(f"  WARNING: Figure {num} failed: {e}")
+
+
 def generate_all_figures(ctx, which=None):
     """Generate diagnostic figures, resampling T1w once.
 
@@ -38,16 +47,16 @@ def generate_all_figures(ctx, which=None):
     which : set of int or None
         Figure numbers to generate (e.g. {1, 2}).  None means all.
     """
-    from scipy.ndimage import binary_dilation
-
     mat = ctx.mat
     N = ctx.N
     paths = ctx.paths
 
+    def _wanted(n):
+        return which is None or n in which
+
     # Resample T1w to grid (shared across figs 1-3)
-    need_t1w = which is None or bool(which & {1, 2, 3})
     t1w = None
-    if need_t1w:
+    if _wanted(1) or _wanted(2) or _wanted(3):
         t1w_path = paths["t1w"]
         if t1w_path.exists():
             t1w = resample_to_grid(
@@ -57,72 +66,44 @@ def generate_all_figures(ctx, which=None):
         else:
             print(f"  WARNING: T1w not found, figures will lack underlay")
 
-    if which is None or 1 in which:
-        print("  Generating Figure 1...")
-        try:
-            generate_fig1(mat, t1w, N, ctx.subject, ctx.profile, ctx.dx, paths["fig1"])
-        except Exception as e:
-            print(f"  WARNING: Figure 1 failed: {e}")
+    if _wanted(1):
+        _try_figure(1, generate_fig1, mat, t1w, N, ctx.subject, ctx.profile,
+                    ctx.dx, paths["fig1"])
 
-    if which is None or 2 in which:
-        print("  Generating Figure 2...")
-        try:
-            generate_fig2(mat, t1w, N, ctx.subject, ctx.profile, ctx.dx, paths["fig2"])
-        except Exception as e:
-            print(f"  WARNING: Figure 2 failed: {e}")
+    if _wanted(2):
+        _try_figure(2, generate_fig2, mat, t1w, N, ctx.subject, ctx.profile,
+                    ctx.dx, paths["fig2"])
 
-    if which is None or 3 in which:
-        sdf = ctx.sdf
-        brain = ctx.brain
-        if sdf is not None and brain is not None:
-            print("  Generating Figure 3...")
-            try:
-                generate_fig3(mat, sdf, t1w, brain, N, ctx.subject, ctx.profile,
-                              ctx.dx, paths["fig3"])
-            except Exception as e:
-                print(f"  WARNING: Figure 3 failed: {e}")
+    if _wanted(3) and ctx.sdf is not None and ctx.brain is not None:
+        _try_figure(3, generate_fig3, mat, ctx.sdf, t1w, ctx.brain, N,
+                    ctx.subject, ctx.profile, ctx.dx, paths["fig3"])
 
-    if which is None or 4 in which:
-        if ctx.fiber_data is not None:
-            print("  Generating Figure 4...")
-            try:
-                generate_fig4(ctx.fiber_data, ctx.subject, ctx.profile, paths["fig4"])
-            except Exception as e:
-                print(f"  WARNING: Figure 4 failed: {e}")
+    if _wanted(4) and ctx.fiber_data is not None:
+        _try_figure(4, generate_fig4, ctx.fiber_data, ctx.subject, ctx.profile,
+                    paths["fig4"])
 
-    if which is None or 5 in which:
-        if ctx.has_simnibs:
-            print("  Generating Figure 5...")
-            try:
-                from preprocessing.validation.checks import _load_simnibs_resampled
-                sim = ctx.get_cached("simnibs_resampled",
-                                     lambda: _load_simnibs_resampled(ctx))
-                generate_fig5(ctx.sdf, sim["sdf"], sim["labels"],
-                              sim["inner_boundary"], t1w, N,
-                              ctx.subject, ctx.profile, ctx.dx,
-                              paths["fig5"])
-            except Exception as e:
-                print(f"  WARNING: Figure 5 failed: {e}")
+    if _wanted(5) and ctx.has_simnibs:
+        from preprocessing.validation.checks import _load_simnibs_resampled
+        sim = ctx.get_cached("simnibs_resampled",
+                             lambda: _load_simnibs_resampled(ctx))
+        _try_figure(5, generate_fig5, ctx.sdf, sim["sdf"], sim["labels"],
+                    sim["inner_boundary"], t1w, N,
+                    ctx.subject, ctx.profile, ctx.dx, paths["fig5"])
 
-    if which is None or 6 in which:
-        if ctx.has_simnibs:
-            # Ensure surface distances are computed (may not be if checks were skipped)
-            if "gt_verts_ours" not in ctx._cache:
-                from preprocessing.validation.checks import _compute_surface_distances
-                sd = ctx.get_cached("surface_distances",
-                                    lambda: _compute_surface_distances(ctx))
-                ctx._cache["gt_verts_ours"] = sd["phys_ours"]
-                ctx._cache["gt_verts_sim"] = sd["phys_sim"]
-                ctx._cache["gt_d_o2s"] = sd["d_o2s"]
-                ctx._cache["gt_d_s2o"] = sd["d_s2o"]
-            print("  Generating Figure 6...")
-            try:
-                generate_fig6(
+    if _wanted(6) and ctx.has_simnibs:
+        # Ensure surface distances are computed (may not be if checks were skipped)
+        if "gt_verts_ours" not in ctx._cache:
+            from preprocessing.validation.checks import _compute_surface_distances
+            sd = ctx.get_cached("surface_distances",
+                                lambda: _compute_surface_distances(ctx))
+            ctx._cache["gt_verts_ours"] = sd["phys_ours"]
+            ctx._cache["gt_verts_sim"] = sd["phys_sim"]
+            ctx._cache["gt_d_o2s"] = sd["d_o2s"]
+            ctx._cache["gt_d_s2o"] = sd["d_s2o"]
+        _try_figure(6, generate_fig6,
                     ctx._cache["gt_verts_ours"], ctx._cache["gt_verts_sim"],
                     ctx._cache["gt_d_o2s"], ctx._cache["gt_d_s2o"],
                     ctx.subject, ctx.profile, paths["fig6"])
-            except Exception as e:
-                print(f"  WARNING: Figure 6 failed: {e}")
 
     del t1w
 

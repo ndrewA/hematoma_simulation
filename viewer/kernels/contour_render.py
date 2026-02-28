@@ -2,19 +2,11 @@
 
 import taichi as ti
 
-from viewer.kernels.common import get_slice_dims as _get_slice_dims
-
-
-@ti.func
-def _sample_sdf(vol: ti.template(), axis: int, slice_idx: int, ui: int, vi: int) -> float:
-    val = 0.0
-    if axis == 2:
-        val = vol[ui, vi, slice_idx]
-    elif axis == 1:
-        val = vol[ui, slice_idx, vi]
-    else:
-        val = vol[slice_idx, ui, vi]
-    return val
+from viewer.kernels.common import (
+    get_slice_dims as _get_slice_dims,
+    pixel_to_voxel as _pixel_to_voxel,
+    sample_f32 as _sample_f32,
+)
 
 
 @ti.kernel
@@ -38,21 +30,18 @@ def contour_slice(
     bh = buf.shape[1]
 
     for px, py in ti.ndrange(pw, ph):
-        scale = ti.min(float(pw) / float(dim_u), float(ph) / float(dim_v)) * zoom
-        u = (px - pw / 2.0) / scale + dim_u / 2.0 - pan_x
-        v = (py - ph / 2.0) / scale + dim_v / 2.0 - pan_y
-
+        u, v = _pixel_to_voxel(px, py, pw, ph, dim_u, dim_v, zoom, pan_x, pan_y)
         ui = int(ti.round(u))
         vi = int(ti.round(v))
 
         if 1 <= ui < dim_u - 1 and 1 <= vi < dim_v - 1:
-            c = _sample_sdf(vol, axis, slice_idx, ui, vi)
+            c = _sample_f32(vol, axis, slice_idx, ui, vi)
             # Check if any neighbor has opposite sign → zero crossing
             is_contour = False
-            r = _sample_sdf(vol, axis, slice_idx, ui + 1, vi)
-            l = _sample_sdf(vol, axis, slice_idx, ui - 1, vi)
-            t = _sample_sdf(vol, axis, slice_idx, ui, vi + 1)
-            b = _sample_sdf(vol, axis, slice_idx, ui, vi - 1)
+            r = _sample_f32(vol, axis, slice_idx, ui + 1, vi)
+            l = _sample_f32(vol, axis, slice_idx, ui - 1, vi)
+            t = _sample_f32(vol, axis, slice_idx, ui, vi + 1)
+            b = _sample_f32(vol, axis, slice_idx, ui, vi - 1)
 
             if (c >= 0.0 and (r < 0.0 or l < 0.0 or t < 0.0 or b < 0.0)):
                 is_contour = True

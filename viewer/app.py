@@ -137,53 +137,7 @@ def launch(subject_id, profile):
         if sb_x0 < rw:
             fill_rect(buf, sb_x0, 0, rw - sb_x0, rh, 0.11, 0.11, 0.13)
 
-        # Render slice panels
-        for panel_idx in range(3):
-            p = state.layout.panels[panel_idx]
-            if p.w == 0 or p.h == 0:
-                continue
-
-            axis = state.PANEL_AXIS[panel_idx]
-            si = state.slice_index(panel_idx)
-            zoom = state.panel_zoom[panel_idx]
-            pan_x, pan_y = state.panel_pan[panel_idx]
-
-            for layer in layers:
-                if not layer.visible:
-                    continue
-                if layer.layer_type == LayerType.CATEGORICAL:
-                    lut = luts[layer.lut_index]
-                    categorical_slice(
-                        layer.field, lut, buf, axis, si,
-                        p.x0, p.y0, p.w, p.h,
-                        layer.opacity, zoom, pan_x, pan_y)
-                elif layer.layer_type == LayerType.SCALAR:
-                    lut = luts[layer.lut_index]
-                    scalar_slice(
-                        layer.field, lut, buf, axis, si,
-                        p.x0, p.y0, p.w, p.h,
-                        layer.vmin, layer.vmax,
-                        layer.opacity, zoom, pan_x, pan_y)
-                elif layer.layer_type == LayerType.CONTOUR:
-                    contour_slice(
-                        layer.field, buf, axis, si,
-                        p.x0, p.y0, p.w, p.h,
-                        layer.opacity, zoom, pan_x, pan_y,
-                        1.0, 0.2, 0.2)  # red contour
-                elif layer.layer_type == LayerType.TENSOR and g2f_matrix is not None:
-                    M = g2f_matrix
-                    dec_slice(
-                        layer.field, buf, axis, si,
-                        p.x0, p.y0, p.w, p.h,
-                        layer.opacity, zoom, pan_x, pan_y,
-                        M[0,0], M[0,1], M[0,2], M[0,3],
-                        M[1,0], M[1,1], M[1,2], M[1,3],
-                        M[2,0], M[2,1], M[2,2], M[2,3], N)
-
-            _draw_panel_crosshair(state, panel_idx, buf)
-            focused = (panel_idx == state.focused_panel)
-            draw_panel_border(buf, p.x0, p.y0, p.w, p.h,
-                              *(0.6, 0.6, 0.2) if focused else (0.15, 0.15, 0.18))
+        _render_slice_panels(state, layers, luts, g2f_matrix, buf, N)
 
         # Render 3D panel (voxel trace in 3D mode, crosshair widget in slice mode)
         p3 = state.layout.panels[3]
@@ -216,12 +170,8 @@ def _draw_panel_crosshair(state, panel_idx, buf):
     zoom = state.panel_zoom[panel_idx]
     pan_x, pan_y = state.panel_pan[panel_idx]
 
-    if axis == 2:
-        cu_vox, cv_vox = state.crosshair[0], state.crosshair[1]
-    elif axis == 1:
-        cu_vox, cv_vox = state.crosshair[0], state.crosshair[2]
-    else:
-        cu_vox, cv_vox = state.crosshair[1], state.crosshair[2]
+    ui, vi = state.AXIS_UV[axis]
+    cu_vox, cv_vox = state.crosshair[ui], state.crosshair[vi]
 
     scale = min(p.w / N, p.h / N) * zoom
     cx = int((cu_vox - N / 2.0 + pan_x) * scale + p.w / 2.0)
@@ -229,6 +179,61 @@ def _draw_panel_crosshair(state, panel_idx, buf):
 
     if 0 <= cx < p.w and 0 <= cy < p.h:
         draw_crosshair(buf, p.x0, p.y0, p.w, p.h, cx, cy)
+
+
+def _render_layer(layer, luts, g2f_matrix, buf, axis, si, p, zoom, pan_x, pan_y, N):
+    """Dispatch a single layer to the appropriate slice kernel."""
+    if layer.layer_type == LayerType.CATEGORICAL:
+        lut = luts[layer.lut_index]
+        categorical_slice(
+            layer.field, lut, buf, axis, si,
+            p.x0, p.y0, p.w, p.h,
+            layer.opacity, zoom, pan_x, pan_y)
+    elif layer.layer_type == LayerType.SCALAR:
+        lut = luts[layer.lut_index]
+        scalar_slice(
+            layer.field, lut, buf, axis, si,
+            p.x0, p.y0, p.w, p.h,
+            layer.vmin, layer.vmax,
+            layer.opacity, zoom, pan_x, pan_y)
+    elif layer.layer_type == LayerType.CONTOUR:
+        contour_slice(
+            layer.field, buf, axis, si,
+            p.x0, p.y0, p.w, p.h,
+            layer.opacity, zoom, pan_x, pan_y,
+            1.0, 0.2, 0.2)
+    elif layer.layer_type == LayerType.TENSOR and g2f_matrix is not None:
+        M = g2f_matrix
+        dec_slice(
+            layer.field, buf, axis, si,
+            p.x0, p.y0, p.w, p.h,
+            layer.opacity, zoom, pan_x, pan_y,
+            M[0,0], M[0,1], M[0,2], M[0,3],
+            M[1,0], M[1,1], M[1,2], M[1,3],
+            M[2,0], M[2,1], M[2,2], M[2,3], N)
+
+
+def _render_slice_panels(state, layers, luts, g2f_matrix, buf, N):
+    """Render all slice panels: layers + crosshair + border per panel."""
+    for panel_idx in range(3):
+        p = state.layout.panels[panel_idx]
+        if p.w == 0 or p.h == 0:
+            continue
+
+        axis = state.PANEL_AXIS[panel_idx]
+        si = state.slice_index(panel_idx)
+        zoom = state.panel_zoom[panel_idx]
+        pan_x, pan_y = state.panel_pan[panel_idx]
+
+        for layer in layers:
+            if layer.visible:
+                _render_layer(layer, luts, g2f_matrix, buf,
+                              axis, si, p, zoom, pan_x, pan_y, N)
+
+        _draw_panel_crosshair(state, panel_idx, buf)
+        focused = (panel_idx == state.focused_panel)
+        draw_panel_border(buf, p.x0, p.y0, p.w, p.h,
+                          *(0.6, 0.6, 0.2) if focused else (0.15, 0.15, 0.18))
 
 
 def _render_3d(state, data, buf, panel, cat_lut, group_opacity):
@@ -313,8 +318,7 @@ def _draw_gui(window, state, layers):
                 gui.text(f"{panel_names[pi]}  {axis_letters[pi]}={si}")
             gui.text("")
 
-        if state.layout_mode == LayoutMode.SLICES:
-            # Layer controls (slice mode only)
+            # Layer controls
             gui.text("Layers")
             for idx, layer in enumerate(layers):
                 layer.visible = gui.checkbox(f"{idx+1} {layer.name}", layer.visible)

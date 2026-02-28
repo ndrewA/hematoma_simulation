@@ -70,54 +70,50 @@ class ViewerData:
         self.profile = profile
 
         pdir = processed_dir(subject_id, profile)
-        N, dx = PROFILES[profile]
-        grid_affine = build_grid_affine(N, dx)
+        self._load_grid_meta(pdir, profile)
+        self._load_volumes(pdir, subject_id)
+        self._derive_masks()
+        self._load_fiber(pdir)
 
-        # Load grid metadata
-        meta_path = pdir / "grid_meta.json"
-        with open(meta_path) as f:
+    def _load_grid_meta(self, pdir, profile):
+        """Load grid metadata and determine actual grid geometry."""
+        N, dx = PROFILES[profile]
+        self.grid_affine = build_grid_affine(N, dx)
+
+        with open(pdir / "grid_meta.json") as f:
             self.meta = json.load(f)
 
-        # Actual grid shape from the data (may differ from PROFILES if
-        # data was generated with older settings)
         sample = nib.load(str(pdir / "material_map.nii.gz"))
         self.grid_shape = sample.shape
-        # Use max dimension for cubic assumption (viewer assumes cubic N)
         self.N = max(self.grid_shape)
         self.dx = dx
-        self.grid_affine = grid_affine
 
-        # If actual data shape doesn't match PROFILES, rebuild affine
         if self.N != N:
             self.grid_affine = build_grid_affine(self.N, self.dx)
 
-        # Material map (categorical)
+    def _load_volumes(self, pdir, subject_id):
+        """Load all volumetric data into Taichi fields."""
         self.material_map = load_volume_u8(pdir / "material_map.nii.gz")
-
-        # Skull SDF (float)
         self.skull_sdf = load_volume_f32(pdir / "skull_sdf.nii.gz")
-
-        # Brain mask (u8)
         self.brain_mask = load_volume_u8(pdir / "brain_mask.nii.gz")
-
-        # T1w (resampled)
         self.t1w, self.t1w_vmin, self.t1w_vmax = load_t1w(
             subject_id, self.grid_affine, self.grid_shape)
 
-        # Dura mask (label 10 from material map)
+    def _derive_masks(self):
+        """Compute derived masks and centroids from loaded volumes."""
         mat_np = self.material_map.to_numpy()
         dura_np = (mat_np == 10).astype(np.uint8)
         self.dura_mask = ti.field(dtype=ti.u8, shape=self.grid_shape)
         self.dura_mask.from_numpy(dura_np)
 
-        # Brain centroid for camera/crosshair centering
         centroid = self.meta.get('brain_centroid_grid')
         if centroid:
             self.brain_centroid = tuple(int(round(c)) for c in centroid)
         else:
             self.brain_centroid = (self.N // 2, self.N // 2, self.N // 2)
 
-        # Fiber tensor (native resolution, shared across profiles)
+    def _load_fiber(self, pdir):
+        """Load fiber tensor data if available."""
         fiber_path = pdir.parent / "fiber_M0.nii.gz"
         self.fiber_field = None
         self.fiber_affine = None
