@@ -13,6 +13,13 @@ class PanelRect:
     h: int
 
 
+class DragType(IntEnum):
+    NONE = 0
+    ORBIT = 1
+    SLICE_PAN = 2
+    PLANE_DRAG = 3
+
+
 class LayoutMode(IntEnum):
     SLICES = 0     # 3 slice panels
     THREE_D = 1    # 3D fullscreen
@@ -94,9 +101,9 @@ class LayoutManager:
             # Top row: axial left, coronal right
             self.panels[0] = PanelRect(0, hh + gap, pw, hh)
             self.panels[1] = PanelRect(pw + gap, hh + gap, pw, hh)
-            # Bottom row: sagittal centered
-            sx = (cw - pw) // 2
-            self.panels[2] = PanelRect(sx, 0, pw, hh)
+            # Bottom row: sagittal left, 3D crosshair widget right
+            self.panels[2] = PanelRect(0, 0, pw, hh)
+            self.panels[3] = PanelRect(pw + gap, 0, pw, hh)
         elif mode == LayoutMode.THREE_D:
             cw = win_w - self.SIDEBAR_W
             self.sidebar_x0 = cw
@@ -129,9 +136,13 @@ class ViewState:
         self.show_ui = True
         # 3D voxel renderer: per-group opacity [brain, csf, dura, skull, choroid, vessel]
         self.group_opacity = [1.0, 1.0, 1.0, 0.0, 1.0, 1.0]
-        # Mouse drag state
-        self._prev_mouse = None
-        self._dragging = False
+        # Drag state machine
+        self._drag_type = DragType.NONE
+        self._drag_prev = None       # previous mouse position (normalized coords)
+        self._drag_panel = -1        # panel that started the drag
+        self._drag_axis = -1         # grabbed axis (for PLANE_DRAG)
+        self._drag_pos = 0.0         # float accumulator (for PLANE_DRAG)
+        self._drag_lmb = True        # True = LMB started drag, False = RMB
 
     PANEL_AXIS = [2, 1, 0]  # panel 0=axial(k), 1=coronal(j), 2=sagittal(i)
 
