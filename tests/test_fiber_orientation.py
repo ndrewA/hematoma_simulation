@@ -1,6 +1,8 @@
 """Tests for preprocessing/fiber_orientation.py — structure tensor, WM mask."""
 
 import numpy as np
+import nibabel as nib
+import pytest
 
 from preprocessing.fiber_orientation import (
     _build_aniso_lut,
@@ -8,9 +10,10 @@ from preprocessing.fiber_orientation import (
     compute_structure_tensor,
     apply_wm_mask,
     build_wm_mask,
+    resample_fiber_m0,
     threshold_fractions,
 )
-from preprocessing.utils import FS_LUT_SIZE
+from preprocessing.utils import FS_LUT_SIZE, PROFILES, build_grid_affine
 
 
 # ---------------------------------------------------------------------------
@@ -294,3 +297,99 @@ class TestThresholdFractions:
         threshold_fractions(fracs, 0.05, brain_mask)
 
         assert id(fracs[0]) == orig_id
+
+
+# ---------------------------------------------------------------------------
+# resample_fiber_m0
+# ---------------------------------------------------------------------------
+class TestResampleFiberM0:
+    """Test resampling of fiber M0 from bedpostX to simulation grid."""
+
+    def _make_source_m0(self, tmp_path, shape=(10, 12, 10), dx=1.25):
+        """Create a synthetic fiber_M0.nii.gz at bedpostX resolution."""
+        affine = np.diag([dx, dx, dx, 1.0])
+        # Offset so grid center aligns with physical origin
+        affine[:3, 3] = -np.array(shape) / 2.0 * dx
+        M0 = np.zeros(shape + (6,), dtype=np.float32)
+        # Paint a uniform X-aligned fiber in the center region
+        s = tuple(slice(s // 4, 3 * s // 4) for s in shape)
+        M0[s + (0,)] = 1.0  # M_00 = 1 (fiber along X)
+        img = nib.Nifti1Image(M0, affine)
+        img.header.set_data_dtype(np.float32)
+        out_path = tmp_path / "fiber_M0.nii.gz"
+        nib.save(img, str(out_path))
+        return M0, affine
+
+    def test_output_shape_and_dtype(self, tmp_path, monkeypatch):
+        """Resampled M0 has correct grid shape and float32 dtype."""
+        self._make_source_m0(tmp_path)
+        profile = "debug"
+        N, dx = PROFILES[profile]
+
+        monkeypatch.setattr(
+            "preprocessing.fiber_orientation.processed_dir",
+            lambda subj, prof: tmp_path if prof == "" else tmp_path / prof,
+        )
+        resample_fiber_m0("test_subject", profile)
+
+        out_path = tmp_path / profile / "fiber_M0.nii.gz"
+        assert out_path.exists()
+        img = nib.load(str(out_path))
+        assert img.shape == (N, N, N, 6)
+        assert img.get_data_dtype() == np.float32
+
+    def test_affine_matches_grid(self, tmp_path, monkeypatch):
+        """Resampled M0 has the simulation grid affine."""
+        self._make_source_m0(tmp_path)
+        profile = "debug"
+        N, dx = PROFILES[profile]
+        expected_affine = build_grid_affine(N, dx)
+
+        monkeypatch.setattr(
+            "preprocessing.fiber_orientation.processed_dir",
+            lambda subj, prof: tmp_path if prof == "" else tmp_path / prof,
+        )
+        resample_fiber_m0("test_subject", profile)
+
+        out_path = tmp_path / profile / "fiber_M0.nii.gz"
+        img = nib.load(str(out_path))
+        np.testing.assert_allclose(img.affine, expected_affine, atol=1e-6)
+
+    def test_nonzero_values_preserved(self, tmp_path, monkeypatch):
+        """Resampled M0 has non-zero values where the source had fiber data."""
+        self._make_source_m0(tmp_path)
+        profile = "debug"
+
+        monkeypatch.setattr(
+            "preprocessing.fiber_orientation.processed_dir",
+            lambda subj, prof: tmp_path if prof == "" else tmp_path / prof,
+        )
+        resample_fiber_m0("test_subject", profile)
+
+        out_path = tmp_path / profile / "fiber_M0.nii.gz"
+        M0_grid = nib.load(str(out_path)).get_fdata(dtype=np.float32)
+        # Should have some non-zero M_00 values from the painted center
+        assert np.any(M0_grid[..., 0] > 0)
+        # Off-diagonal should remain near zero (X-aligned fiber)
+        assert np.max(np.abs(M0_grid[..., 3])) < 1e-6  # M_01
+        assert np.max(np.abs(M0_grid[..., 4])) < 1e-6  # M_02
+        assert np.max(np.abs(M0_grid[..., 5])) < 1e-6  # M_12
+
+    def test_empty_source_gives_zeros(self, tmp_path, monkeypatch):
+        """All-zero source M0 produces all-zero resampled output."""
+        # Create source with all zeros
+        shape = (10, 12, 10)
+        affine = np.diag([1.25, 1.25, 1.25, 1.0])
+        M0 = np.zeros(shape + (6,), dtype=np.float32)
+        img = nib.Nifti1Image(M0, affine)
+        nib.save(img, str(tmp_path / "fiber_M0.nii.gz"))
+
+        monkeypatch.setattr(
+            "preprocessing.fiber_orientation.processed_dir",
+            lambda subj, prof: tmp_path if prof == "" else tmp_path / prof,
+        )
+        resample_fiber_m0("test_subject", "debug")
+
+        out_path = tmp_path / "debug" / "fiber_M0.nii.gz"
+        M0_grid = nib.load(str(out_path)).get_fdata(dtype=np.float32)
+        np.testing.assert_allclose(M0_grid, 0.0)

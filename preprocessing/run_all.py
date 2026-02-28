@@ -55,6 +55,8 @@ def build_step_argv(step_module, subject, profile, N, dx):
     instead of a profile name, since child steps only know named profiles.
     """
     if step_module == "preprocessing.fiber_orientation":
+        if profile in PROFILES:
+            return ["--subject", subject, "--profile", profile]
         return ["--subject", subject]
     if profile in PROFILES:
         return ["--subject", subject, "--profile", profile]

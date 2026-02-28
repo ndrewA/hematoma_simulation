@@ -3,10 +3,14 @@
 M_0 encodes white matter fiber architecture used by the Darcy solver
 (anisotropic permeability) and HGO model (anisotropic elasticity) at runtime.
 
-Output is profile-independent — saved to data/processed/{subject_id}/ at native
-bedpostX resolution (1.25 mm, 145x174x145).
+The base M_0 is profile-independent — saved to data/processed/{subject_id}/
+at native bedpostX resolution (1.25 mm, 145x174x145).
+
+When a --profile is given, M_0 is also resampled to the simulation grid and
+saved to the profile directory as fiber_M0.nii.gz (N³×6, grid affine).
 
     python -m preprocessing.fiber_orientation --subject 157336
+    python -m preprocessing.fiber_orientation --subject 157336 --profile prod
 """
 
 import argparse
@@ -16,7 +20,10 @@ import nibabel as nib
 import numpy as np
 
 from preprocessing.profiling import step
-from preprocessing.utils import FS_LUT_SIZE, raw_dir, processed_dir, section
+from preprocessing.utils import (
+    FS_LUT_SIZE, PROFILES, raw_dir, processed_dir, section,
+    build_grid_affine, resample_to_grid,
+)
 
 # ---------------------------------------------------------------------------
 # Anisotropic (white-matter-like) FreeSurfer labels  (Section 4.4)
@@ -45,11 +52,15 @@ def _build_aniso_lut():
 # CLI
 # ---------------------------------------------------------------------------
 def parse_args(argv=None):
-    """CLI: --subject (required), --f-threshold (default 0.05)."""
+    """CLI: --subject (required), --profile (optional), --f-threshold."""
     parser = argparse.ArgumentParser(
         description="Compute fiber structure tensor M_0 from bedpostX data."
     )
     parser.add_argument("--subject", required=True, help="HCP subject ID")
+    parser.add_argument(
+        "--profile", choices=list(PROFILES.keys()), default=None,
+        help="If given, also resample M_0 to simulation grid",
+    )
     parser.add_argument(
         "--f-threshold", type=float, default=0.05,
         help="Volume fraction threshold (default: 0.05)",
@@ -362,6 +373,47 @@ def print_smoothness(M0, brain_mask):
 
 
 # ---------------------------------------------------------------------------
+# Grid resample
+# ---------------------------------------------------------------------------
+def resample_fiber_m0(subject, profile):
+    """Resample profile-independent fiber_M0 to the simulation grid.
+
+    Loads fiber_M0.nii.gz from the subject directory (bedpostX resolution),
+    resamples each of the 6 upper-triangle components with trilinear
+    interpolation, and saves to the profile directory.
+    """
+    N, dx = PROFILES[profile]
+    src_path = processed_dir(subject, "") / "fiber_M0.nii.gz"
+    img = nib.load(str(src_path))
+    M0 = img.get_fdata(dtype=np.float32)
+    src_affine = img.affine
+
+    grid_affine = build_grid_affine(N, dx)
+    grid_shape = (N, N, N)
+
+    M0_grid = np.zeros(grid_shape + (6,), dtype=np.float32)
+    for c in range(6):
+        M0_grid[..., c] = resample_to_grid(
+            (M0[..., c], src_affine), grid_affine, grid_shape,
+            order=1, cval=0.0, dtype=np.float32,
+        )
+
+    out_dir = processed_dir(subject, profile)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / "fiber_M0.nii.gz"
+    out_img = nib.Nifti1Image(M0_grid, grid_affine)
+    out_img.header.set_data_dtype(np.float32)
+    nib.save(out_img, str(out_path))
+
+    n_active = int(np.count_nonzero(np.any(M0_grid != 0, axis=-1)))
+    n_total = N ** 3
+    print(f"Saved {out_path}")
+    print(f"  Shape: {M0_grid.shape}  dx={dx}mm")
+    print(f"  Active voxels: {n_active}/{n_total} "
+          f"({100 * n_active / n_total:.1f}%)")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main(argv=None):
@@ -430,6 +482,12 @@ def main(argv=None):
     print_brain_coverage(M0, brain_mask, is_aniso)
     print_principal_directions(M0, diff_labels)
     print_smoothness(M0, brain_mask)
+
+    # 7. Optional: resample to simulation grid
+    if args.profile is not None:
+        section(f"Resampling M_0 to grid ({args.profile})")
+        with step("resample fiber M0"):
+            resample_fiber_m0(subject, args.profile)
 
     section("Done.")
 
