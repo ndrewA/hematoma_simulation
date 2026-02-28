@@ -3,7 +3,11 @@
 import numpy as np
 import pytest
 
-from preprocessing.resample_sources import compute_brain_bbox, verify_source_affine
+from preprocessing.resample_sources import (
+    build_grid_meta,
+    compute_brain_bbox,
+    verify_source_affine,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -53,3 +57,55 @@ class TestVerifySourceAffine:
     def test_unexpected_affine_warns(self):
         affine = np.diag([1.0, 1.0, 1.0, 1.0])
         assert verify_source_affine(affine) is False
+
+
+# ---------------------------------------------------------------------------
+# build_grid_meta
+# ---------------------------------------------------------------------------
+class TestBuildGridMeta:
+    def _make_args(self, N=10, dx=1.0):
+        from types import SimpleNamespace
+        return SimpleNamespace(subject="test", profile="debug", N=N, dx=dx)
+
+    def test_basic_fields(self):
+        N, dx = 10, 1.0
+        args = self._make_args(N, dx)
+        grid_affine = np.diag([dx, dx, dx, 1.0])
+        grid_affine[:3, 3] = -N * dx / 2.0
+        source_affine = np.diag([-0.7, 0.7, 0.7, 1.0])
+        meta = build_grid_meta(
+            args, grid_affine, source_affine, (260, 311, 260),
+            np.array([3, 3, 3]), np.array([7, 7, 7]),
+            np.array([5.0, 5.0, 5.0]), 125,
+        )
+        assert meta["grid_size"] == 10
+        assert meta["dx_mm"] == 1.0
+        assert meta["subject_id"] == "test"
+        assert meta["profile"] == "debug"
+        assert meta["domain_extent_mm"] == 10.0
+
+    def test_phys_to_grid_is_inverse(self):
+        N, dx = 10, 2.0
+        args = self._make_args(N, dx)
+        grid_affine = np.diag([dx, dx, dx, 1.0])
+        grid_affine[:3, 3] = -N * dx / 2.0
+        meta = build_grid_meta(
+            args, grid_affine, np.diag([-0.7, 0.7, 0.7, 1.0]),
+            (260, 311, 260), np.array([3, 3, 3]), np.array([7, 7, 7]),
+            np.array([5.0, 5.0, 5.0]), 125,
+        )
+        g2p = np.array(meta["affine_grid_to_phys"])
+        p2g = np.array(meta["affine_phys_to_grid"])
+        np.testing.assert_allclose(g2p @ p2g, np.eye(4), atol=1e-10)
+
+    def test_brain_volume_ml(self):
+        N, dx = 10, 2.0
+        args = self._make_args(N, dx)
+        grid_affine = np.diag([dx, dx, dx, 1.0])
+        meta = build_grid_meta(
+            args, grid_affine, np.eye(4), (1, 1, 1),
+            np.array([0, 0, 0]), np.array([9, 9, 9]),
+            np.array([5.0, 5.0, 5.0]), 100,
+        )
+        # brain_volume_ml = 100 * 2.0³ / 1000 = 0.8
+        assert meta["brain_volume_ml"] == 0.8
