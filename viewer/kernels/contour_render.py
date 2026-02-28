@@ -24,12 +24,12 @@ def contour_slice(
     cr: float, cg: float, cb: float,
 ):
     """Draw zero-contour of SDF as a colored line on the slice."""
-    dim_u, dim_v = _get_slice_dims(vol, axis)
     contour_color = ti.Vector([cr, cg, cb])
     bw = buf.shape[0]
     bh = buf.shape[1]
 
     for px, py in ti.ndrange(pw, ph):
+        dim_u, dim_v = _get_slice_dims(vol, axis)
         u, v = _pixel_to_voxel(px, py, pw, ph, dim_u, dim_v, zoom, pan_x, pan_y)
         ui = int(ti.round(u))
         vi = int(ti.round(v))
