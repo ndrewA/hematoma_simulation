@@ -1244,6 +1244,9 @@ def main(argv=None):
                                      args.falx_thickness, tent_mask)
     del fs, skull_sdf
 
+    if falx_mask is None:
+        raise ValueError("Falx reconstruction failed (degenerate geometry)")
+
     # Merge into material map
     n_falx, n_tent, n_overlap, n_total = merge_dural(mat, falx_mask, tent_mask)
     print(f"\nMerged: {n_total} total dural voxels "

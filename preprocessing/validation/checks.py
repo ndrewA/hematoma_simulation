@@ -342,6 +342,18 @@ def check_d5(ctx):
         ctx.record("D5", True, value="no cut-cell voxels")
         return
 
+    # Exclude boundary voxels where central differences would be clamped
+    interior = (
+        (cut_cell[:, 0] > 0) & (cut_cell[:, 0] < N - 1) &
+        (cut_cell[:, 1] > 0) & (cut_cell[:, 1] < N - 1) &
+        (cut_cell[:, 2] > 0) & (cut_cell[:, 2] < N - 1)
+    )
+    cut_cell = cut_cell[interior]
+    n_cut = len(cut_cell)
+    if n_cut == 0:
+        ctx.record("D5", True, value="no interior cut-cell voxels")
+        return
+
     # Sample up to 100k cut-cell voxels for gradient computation
     rng = np.random.default_rng(42)
     n_sample = min(100_000, n_cut)
@@ -350,9 +362,9 @@ def check_d5(ctx):
     grad_mag_sq = np.zeros(n_sample)
     for axis in range(3):
         fwd = sample.copy()
-        fwd[:, axis] = np.clip(fwd[:, axis] + 1, 0, N - 1)
+        fwd[:, axis] += 1
         bwd = sample.copy()
-        bwd[:, axis] = np.clip(bwd[:, axis] - 1, 0, N - 1)
+        bwd[:, axis] -= 1
         diff = (sdf[fwd[:, 0], fwd[:, 1], fwd[:, 2]]
                 - sdf[bwd[:, 0], bwd[:, 1], bwd[:, 2]])
         grad_mag_sq += (diff / (2 * dx)) ** 2

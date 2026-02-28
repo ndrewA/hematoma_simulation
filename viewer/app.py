@@ -61,8 +61,13 @@ def launch(subject_id, profile):
     if data.fiber_field is not None:
         layers.append(Layer("Fiber DEC", LayerType.TENSOR, data.fiber_field,
                             visible=False, opacity=0.8))
-        fiber_affine_inv = np.linalg.inv(data.fiber_affine)
-        g2f_matrix = (fiber_affine_inv @ data.grid_affine)[:3, :]
+        try:
+            fiber_affine_inv = np.linalg.inv(data.fiber_affine)
+        except np.linalg.LinAlgError:
+            print("WARNING: singular fiber affine matrix, skipping fiber layer")
+            layers.pop()  # remove the Fiber DEC layer just appended
+        else:
+            g2f_matrix = (fiber_affine_inv @ data.grid_affine)[:3, :]
 
     luts = [cat_lut, gray_lut, div_lut, dura_lut]
     layers[0].lut_index = 1  # T1w → grayscale
