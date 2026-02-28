@@ -69,10 +69,12 @@ def verify_source_affine(source_affine):
     """Check that the source affine diagonal is approximately (-0.7, +0.7, +0.7)."""
     diag = np.diag(source_affine)[:3]
     expected = np.array([-0.7, 0.7, 0.7])
-    if not np.allclose(diag, expected, atol=0.05):
+    is_ok = bool(np.allclose(diag, expected, atol=0.05))
+    if not is_ok:
         print(f"WARNING: source affine diagonal {diag} != expected {expected}")
     else:
         print(f"Source affine diagonal: {diag}  [OK]")
+    return is_ok
 
 
 def compute_brain_bbox(mask):

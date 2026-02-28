@@ -802,9 +802,12 @@ def reconstruct_falx(mat, fs, skull_sdf, dx_mm, crop_slices,
         _compute_midplane_membrane(fs_crop, skull_crop, dx_mm, thickness_mm)
 
     # Phase 2: Edge profiles, anchor, crista galli → geometry bundle
-    geo = _detect_falx_geometry(
-        membrane, skull_crop, tent_crop,
-        cc_landmarks, cc_top_z, cc_exists, dx_mm, fs_crop)
+    try:
+        geo = _detect_falx_geometry(
+            membrane, skull_crop, tent_crop,
+            cc_landmarks, cc_top_z, cc_exists, dx_mm, fs_crop)
+    except ValueError:
+        return None
     del fs_crop, skull_crop
 
     # Phase 3: Free edge curve (PCHIP + Bezier)

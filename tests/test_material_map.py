@@ -145,27 +145,23 @@ class TestApplyMapping:
 # collect_warnings
 # ---------------------------------------------------------------------------
 class TestCollectWarnings:
-    def test_no_warnings_for_direct_labels(self, capsys):
+    def test_no_warnings_for_direct_labels(self):
         _, direct_labels = build_lut()
-        # Only direct labels present
         fs = np.array(sorted(direct_labels)[:10], dtype=np.int16)
-        collect_warnings(fs, direct_labels)
-        captured = capsys.readouterr()
-        assert "Fallback" not in captured.out
-        assert "Unknown" not in captured.out
+        fallback, unknown = collect_warnings(fs, direct_labels)
+        assert fallback == []
+        assert unknown == []
 
-    def test_fallback_detected(self, capsys):
+    def test_fallback_detected(self):
         _, direct_labels = build_lut()
         # Label 1 (Cerebral Exterior) is in FALLBACK_MAP
         fs = np.array([0, 2, 1], dtype=np.int16)
-        collect_warnings(fs, direct_labels)
-        captured = capsys.readouterr()
-        assert "Fallback" in captured.out
+        fallback, unknown = collect_warnings(fs, direct_labels)
+        assert len(fallback) > 0
 
-    def test_unknown_detected(self, capsys):
+    def test_unknown_detected(self):
         _, direct_labels = build_lut()
         # Label 999 is in neither DIRECT_MAP nor FALLBACK_MAP
         fs = np.array([0, 999], dtype=np.int16)
-        collect_warnings(fs, direct_labels)
-        captured = capsys.readouterr()
-        assert "Unknown" in captured.out
+        fallback, unknown = collect_warnings(fs, direct_labels)
+        assert len(unknown) > 0

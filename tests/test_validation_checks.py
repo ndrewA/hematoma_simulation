@@ -2,7 +2,6 @@
 
 import numpy as np
 import pytest
-from pathlib import Path
 from scipy.ndimage import distance_transform_edt
 
 from preprocessing.validation.checks import (
@@ -15,49 +14,7 @@ from preprocessing.validation.checks import (
     check_d4,
     check_d5,
 )
-from preprocessing.validation import CheckContext
-
-
-# ---------------------------------------------------------------------------
-# Shared helper — build a CheckContext with pre-loaded arrays
-# ---------------------------------------------------------------------------
-
-_NOFILE = Path("/tmp/_validation_test_nonexistent")
-
-
-def _make_ctx(mat, sdf=None, dx=1.0):
-    """Build a real CheckContext with arrays injected (bypasses lazy NIfTI loading)."""
-    N = mat.shape[0]
-    paths = {
-        "mat": _NOFILE,
-        "sdf": _NOFILE,
-        "brain": _NOFILE,
-        "fs": _NOFILE,
-        "meta": _NOFILE,
-        "fiber": _NOFILE,
-        "t1w": _NOFILE,
-        "val_dir": _NOFILE,
-    }
-    ctx = CheckContext.__new__(CheckContext)
-    ctx.paths = paths
-    ctx.N = N
-    ctx.dx = dx
-    ctx.subject = "test"
-    ctx.profile = "debug"
-    ctx.verbose = False
-    ctx._mat = mat.astype(np.uint8)
-    ctx._sdf = sdf if sdf is not None else np.ones((N, N, N), dtype=np.float32)
-    ctx._brain = None
-    ctx._meta = None
-    ctx._headers = None
-    ctx._fiber_img = None
-    ctx._fiber_data = None
-    ctx._cache = {}
-    ctx.results = []
-    ctx.census = {}
-    ctx.metrics = {}
-    ctx.has_simnibs = False
-    return ctx
+from tests.conftest import _make_ctx
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -339,6 +296,20 @@ class TestCheckD5:
         ctx = _make_ctx(mat, sdf=sdf, dx=dx)
         check_d5(ctx)
         assert ctx.results[-1]["status"] == "WARN"
+
+    def test_boundary_cut_cells_filtered(self):
+        """Regression (f5041ca): boundary voxels were using clamped one-sided differences."""
+        N = 10
+        sdf = np.full((N, N, N), 5.0, dtype=np.float32)
+        # Place zero-crossing only at array boundary faces (x=0, x=N-1)
+        # These are the only cut cells, and should all be excluded
+        sdf[0, :, :] = -0.3
+        sdf[-1, :, :] = -0.3
+        mat = np.zeros((N, N, N), dtype=np.uint8)
+        ctx = _make_ctx(mat, sdf=sdf, dx=1.0)
+        check_d5(ctx)
+        # Should pass — boundary cut-cells are excluded, not biased
+        assert ctx.results[-1]["status"] == "PASS"
 
 
 # ═══════════════════════════════════════════════════════════════════════════

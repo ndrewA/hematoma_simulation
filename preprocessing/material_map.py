@@ -210,6 +210,8 @@ def collect_warnings(fs_labels, direct_labels):
         for lab, count, u8 in sorted(unknown_hits):
             print(f"  FS {lab:5d} → u8={u8} (fallback):  {count} voxels")
 
+    return fallback_hits, unknown_hits
+
 
 # ---------------------------------------------------------------------------
 # I/O

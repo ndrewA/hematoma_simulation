@@ -27,6 +27,7 @@ from preprocessing.dural_membrane import (
     _detect_falx_geometry,
     _compute_midplane_membrane,
     _measure_notch_ellipse,
+    reconstruct_falx,
     reconstruct_tentorium,
     _FalxGeometry,
     _MOF_LEFT,
@@ -652,20 +653,15 @@ class TestSolveBezierShape:
         assert len(inner_ys) > len(pchip_ys)  # PCHIP + Bezier
 
     def test_degenerate_returns_none(self):
-        # Make genu and crista at the exact same y AND membrane exists only
-        # at one y → skull contour has zero length between endpoints
-        geo = _make_falx_geometry(crista_y=55, crista_z=10.0, genu_y=35,
-                                  mem_y_max=55)
-        # Override mem_exists so membrane only exists at genu_y and crista_y
-        # (no contour between them, causing skull_len < 1e-8)
+        # Make genu and crista at the same y with mem_top == mem_bot
+        # → skull contour start == end → skull_len == 0 → returns None
+        geo = _make_falx_geometry(crista_y=35, crista_z=40.0, genu_y=35,
+                                  mem_y_max=35)
         geo.mem_exists[:] = False
-        geo.mem_exists[geo.genu_y] = True
-        geo.mem_exists[geo.crista_y] = True
-        geo.mem_top_z[geo.genu_y] = 70
-        geo.mem_bot_z[geo.genu_y] = 10
-        geo.mem_top_z[geo.crista_y] = 70
-        geo.mem_bot_z[geo.crista_y] = 10
-        geo.cc_landmarks = {"genu": (geo.genu_y, 21.3)}
+        geo.mem_exists[35] = True
+        geo.mem_top_z[35] = 40
+        geo.mem_bot_z[35] = 40
+        geo.cc_landmarks = {"genu": (35, 40.0)}
 
         pchip_ys, pchip_zs, genu_ctrl_z = _build_free_edge_controls(geo)
         outer_y, outer_z, post_area = _collect_boundary_polylines(geo)
@@ -674,12 +670,7 @@ class TestSolveBezierShape:
             pchip_ys, pchip_zs, genu_ctrl_z,
             outer_y, outer_z, post_area, geo, dx_mm=1.0)
 
-        # With only 2 membrane points the skull contour has the
-        # start == end on the genu side → skull_len == 0 → returns None
-        # OR the Bezier still works because the contour wraps through
-        # the 2 points. Either way the function should not crash.
-        # The key test is that it handles sparse geometry gracefully.
-        assert result is None or isinstance(result, tuple)
+        assert result is None
 
     def test_inner_curve_spans_anchor_to_crista(self):
         pchip_ys, pchip_zs, genu_ctrl_z, outer_y, outer_z, post_area, geo = \
@@ -893,20 +884,19 @@ class TestReconstructTentorium:
     def test_tentorium_between_tissues(self):
         shape = (30, 40, 30)
         mat = np.zeros(shape, dtype=np.uint8)
-        # Cerebral above z=15
-        mat[5:25, 5:35, 16:28] = 1
-        # Cerebellar below z=15
-        mat[8:22, 10:30, 3:14] = 4
+        # Cerebral above z=15 (z=15..27)
+        mat[5:25, 5:35, 15:28] = 1
+        # Cerebellar below z=15 (z=3..14), adjacent to cerebral
+        mat[8:22, 10:30, 3:15] = 4
         crop_slices = (slice(0, 30), slice(0, 40), slice(0, 30))
 
         tent = reconstruct_tentorium(mat, dx_mm=1.0, notch_radius=5.0,
                                      crop_slices=crop_slices)
 
-        if tent.any():
-            # Tent voxels should cluster near the interface (z ~ 14-16)
-            tent_z = np.where(tent.any(axis=(0, 1)))[0]
-            median_z = np.median(tent_z)
-            assert 10 < median_z < 20
+        assert tent.any(), "tentorium should be non-empty with separated cerebral/cerebellar tissue"
+        tent_z = np.where(tent.any(axis=(0, 1)))[0]
+        median_z = np.median(tent_z)
+        assert 10 < median_z < 20
 
     def test_empty_mat_no_crash(self):
         shape = (10, 10, 10)
@@ -919,3 +909,25 @@ class TestReconstructTentorium:
 
         assert tent.shape == shape
         assert not tent.any()
+
+
+# ---------------------------------------------------------------------------
+# reconstruct_falx — regression
+# ---------------------------------------------------------------------------
+class TestReconstructFalxRegression:
+    def test_degenerate_geometry_returns_none(self):
+        """Regression (f5041ca): reconstruct_falx should return None, not crash,
+        when geometry is degenerate (e.g. no crista galli landmarks)."""
+        X, Y, Z = 10, 10, 10
+        mat = np.zeros((X, Y, Z), dtype=np.uint8)
+        mat[:X // 2, :, :] = 1
+        mat[X // 2:, :, :] = 1
+        fs = np.zeros((X, Y, Z), dtype=np.int16)
+        fs[4, 5, 5] = 2   # left WM
+        fs[5, 5, 5] = 41  # right WM
+        skull_sdf = np.full((X, Y, Z), -5.0, dtype=np.float32)
+        crop_slices = (slice(0, X), slice(0, Y), slice(0, Z))
+
+        result = reconstruct_falx(mat, fs, skull_sdf, dx_mm=1.0,
+                                  crop_slices=crop_slices)
+        assert result is None

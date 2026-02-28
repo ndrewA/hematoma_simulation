@@ -46,14 +46,10 @@ class TestComputeBrainBbox:
 # verify_source_affine
 # ---------------------------------------------------------------------------
 class TestVerifySourceAffine:
-    def test_expected_hcp_affine(self, capsys):
+    def test_expected_hcp_affine(self):
         affine = np.diag([-0.7, 0.7, 0.7, 1.0])
-        verify_source_affine(affine)
-        captured = capsys.readouterr()
-        assert "OK" in captured.out
+        assert verify_source_affine(affine) is True
 
-    def test_unexpected_affine_warns(self, capsys):
+    def test_unexpected_affine_warns(self):
         affine = np.diag([1.0, 1.0, 1.0, 1.0])
-        verify_source_affine(affine)
-        captured = capsys.readouterr()
-        assert "WARNING" in captured.out
+        assert verify_source_affine(affine) is False
